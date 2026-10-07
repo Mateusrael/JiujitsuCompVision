@@ -1,4 +1,4 @@
-"""Training and validation over identical recording-group split manifests."""
+"""Training and validation over the same verified split manifest for both models."""
 
 import json
 import random
@@ -137,6 +137,8 @@ def train(args):
                    "annotations": str(annotations_path), "split": str(split_path),
                    "annotation_sha256": sha256_file(annotations_path),
                    "split_sha256": sha256_file(split_path),
+                   "split_method": manifest["split_method"],
+                   "evaluation_scope": manifest.get("evaluation_scope", "Held-out recording groups."),
                    "class_names": manifest["class_names"], "label_map": manifest["label_map"],
                    "images_dir": images_dir, "device": str(device), "run_dir": str(run_dir)})
     start_epoch = checkpoint["epoch"] if checkpoint else 0

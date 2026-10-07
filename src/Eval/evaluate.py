@@ -42,6 +42,8 @@ def evaluate(args):
               "model_config": config["model_config"],
               "annotation_sha256": config["annotation_sha256"],
               "split_sha256": config["split_sha256"], "label_map": config["label_map"],
+              "split_method": manifest["split_method"],
+              "evaluation_scope": manifest.get("evaluation_scope", "Held-out recording groups."),
               "metrics": metrics, "provenance": provenance(torch, device)}
     output = Path(args.output).expanduser().resolve() if args.output else (
         checkpoint_path.parent.parent / "diagnostics" / "test_metrics.json")

@@ -12,7 +12,7 @@ and separate per-experiment outputs.
 install/        environment probe and Linux dependency setup
 launchers/      editable paths and commands to run common operations
 src/
-  Dataset/      annotation validation, audit, download, recording splits
+  Dataset/      annotation validation, audit, download, shared evaluation splits
   Loader/       paired-pose features and image loading
   Modules/      pose MLP and ResNet-18
   Train/        training, checkpointing, experiment metadata
@@ -26,23 +26,25 @@ diagnostics/    environment and dataset reports (ignored)
 dist/           upload ZIPs generated locally (ignored)
 ```
 
-## First upload to JupyterLab
+## First deployment to JupyterLab
 
-Open `privado/Jiujitsu` in JupyterLab's file browser and upload
-`dist/VisaoComp-source.zip` using the upload arrow. Open a **Terminal** from the
-Launcher. Opening a terminal does not guarantee it starts inside the selected
-file-browser folder. Run these commands on separate lines:
+Open a **Terminal** from JupyterLab's Launcher and clone into the persistent
+folder. Run each command separately. Skip cloning if the checkout already exists:
 
 ```bash
-cd /home/jovyan/privado/Jiujitsu
-python3 -m zipfile -e VisaoComp-source.zip .
+cd /home/jovyan/privado
+git clone --branch master https://github.com/Mateusrael/JiujitsuCompVision.git
+cd JiujitsuCompVision
 bash bootstrap.sh --check-only
 ```
 
-The ZIP has a flat project root, so extraction inside `Jiujitsu` puts `src/`,
-`install/` and `launchers/` there. Extract an updated bundle into a fresh folder
-or review source differences before replacing edited files. Datasets and runs
-are never included in this source bundle.
+For an existing checkout, finish active runs, inspect `git status`, and update
+with `git pull --ff-only`. As a fallback, upload `dist/VisaoComp-source.zip` to a
+fresh `privado/JiujitsuCompVision` folder and extract it there with
+`python3 -m zipfile -e VisaoComp-source.zip .`. The ZIP has a flat project root
+and contains neither Git history nor datasets or runs. Review local source edits
+before replacing an older upload. A terminal may start outside the folder shown
+in JupyterLab's file browser; use `cd` explicitly.
 
 `--check-only` saves `diagnostics/environment.json`, checks Git and optional
 outbound HTTP connectivity, and inspects Python/PyTorch/GPU availability. It does
@@ -110,14 +112,18 @@ bash launchers/DOWNLOAD_DATA.sh
 bash launchers/AUDIT_DATASET.sh
 ```
 
-For the image baseline, download and extract the image archive on the DGX:
+**Default bootstrap and the synthetic GPU smoke test do not download images.** The
+default `DOWNLOAD_DATA.sh` command above downloads annotations only. Prepare the
+images on the DGX with:
 
 ```bash
-bash launchers/DOWNLOAD_DATA.sh --images
-bash launchers/AUDIT_DATASET.sh --images-dir "$PWD/Data/images"
+bash launchers/DOWNLOAD_IMAGES.sh
 ```
 
-Use your configured data path in the last command if it differs from `Data/`.
+This launcher downloads the archive with progress reporting, extracts images,
+and audits every annotated image path. Its completion message confirms all three
+steps succeeded; the report is saved to `diagnostics/dataset_audit.json` (or your
+configured diagnostics directory). It does not start training.
 The observed image archive has root-level JPEG names such as `0101166.jpg`; the
 downloader extracts these into `Data/images/`. It keeps the archive, resumes
 interrupted HTTP downloads when the server supports it, checks extraction paths
@@ -139,30 +145,76 @@ redistributed in this repository or bundle.
 
 ## Create one split for both models
 
-**The recording/camera mapping is not yet verified.** The image prefix is a video
-identifier; it is not proof of an independent recording. Do not assign random
-frames to train/validation/test.
-
-The audit reports observed prefixes and class counts. Use that report together
-with authoritative recording metadata to fill a copy of
-`docs/recording_groups.example.json` at `Data/recording_groups.json`. Each observed
-prefix needs an entry with `recording` and `split` fields. The allowed split names
-are `train`, `val`, and `test`. In `description`, record the evidence used to group
-cameras. The template intentionally contains no invented assignments.
+The default is a **single-view temporal holdout within known videos**. It compares
+the models on later examples of the same classes in selected videos. It does not
+measure generalization to new matches or athletes. The supplied audit shows that
+some classes appear in only two video prefixes, so assigning complete videos to
+three partitions cannot give every partition all ten classes. Camera grouping
+and synchronization are not independently verified.
 
 ```bash
-bash launchers/PREPARE_SPLITS.sh --groups "$PWD/Data/recording_groups.json"
+bash launchers/PREPARE_SPLITS.sh
 ```
 
-The split tool rejects missing/extra prefixes, a recording appearing in multiple
-splits, duplicate images, and categories absent from any split. It saves the
-annotation hash, explicit class mapping, exact assignments and coverage. Reuse
-that same manifest for both baselines. Existing manifests are not overwritten.
+This creates `Data/splits/temporal_split.json`. The source selection uses one
+video prefix for each normalized class:
 
-If there are too few independent recordings per category to satisfy coverage,
-this evaluation design cannot support the desired comparison yet. Inspect that
-constraint and agree on a clearly labeled alternative or collect additional
-recordings; this project will not silently fall back to frame-random evaluation.
+| Video prefix | Selected classes |
+|---|---|
+| `00` | open guard, closed guard |
+| `03` | 50-50 guard, half guard |
+| `06` | mount, side control |
+| `09` | turtle |
+| `11` | standing, takedown |
+| `14` | back |
+
+All other source views are excluded, as are incidental occurrences of a class
+outside its selected prefix. For example, a standing annotation in prefix `00`
+is excluded. Both classifiers use exactly the same retained examples.
+
+Within each class, records are ordered by their original frame numbers and
+provisionally divided into **70% train, 15% validation, and 15% test**. Around
+every change of partition within each selected video, including changes between
+different classes, the tool removes an embargo of 75 frames on either side of
+the boundary midpoint. It then verifies that retained frames in different
+partitions are **more than 150 frames apart**, approximately five seconds at the
+dataset's roughly 30 fps. Ratios change after these exclusions. This interval
+reduces neighboring-frame overlap; it does not establish event independence.
+
+Validation on **2026-10-07** against all 120,279 official annotations produced:
+
+| Partition | Retained examples |
+|---|---:|
+| Train | 31,093 |
+| Validation | 5,235 |
+| Test | 6,138 |
+
+All ten classes are present in every partition; the smallest class/partition
+combination is validation takedown with 106 examples. The minimum separation is
+151 frames in every selected prefix. Another 77,813 examples are excluded:
+74,675 by source selection and 3,138 by the temporal embargo. These counts apply
+to annotation SHA-256
+`b7633ed161372bef7d0dcdd2cb3bc69400147b6a2532a4a5b8070048a1dd62bc`.
+
+The tool requires at least 20 retained examples of every class in each partition
+and stops if coverage or separation fails. It never silently reduces the gap or
+falls back to random frames. The manifest stores every image assignment,
+exclusion reason, source selection, boundary, coverage count and annotation hash.
+Both loaders reconstruct and verify the manifest before using it. Existing
+manifests are never overwritten; use a new output path and update `SPLIT_FILE`
+when deliberately changing the protocol. See `--help` for explicit options.
+
+For data with verified recording metadata and enough independent recordings per
+class, the original recording-group method remains available explicitly:
+
+```bash
+bash launchers/PREPARE_SPLITS.sh --method recording-group --groups "$PWD/Data/recording_groups.json" --output "$PWD/Data/splits/recording_split.json"
+```
+
+Use `docs/recording_groups.example.json` as the metadata template and set
+`SPLIT_FILE` to this separate manifest in your local launcher configuration.
+That method keeps all views of a recording together and still requires every
+class in every partition.
 
 ## Smoke tests and training
 
@@ -180,7 +232,9 @@ For a small CPU check when a GPU is not allocated, use `--device cpu` explicitly
 The smoke check uses synthetic inputs and untrained image weights. Full image
 training uses pretrained ResNet-18 weights, requiring a download/cache on first use.
 
-After the shared recording split is verified and generated:
+The following are training examples to run after preparing the data and shared
+split and choosing the model experiment. Setup and split preparation do not
+start them automatically:
 
 ```bash
 RUN_NAME=pose-baseline bash launchers/START_TRAINING.sh --model pose --epochs 30
@@ -245,12 +299,22 @@ bundle manifest alongside archived results when deploying by upload.
 
 ## Validation status
 
-The parser and annotation conventions were checked against a bounded sample of
-the official annotation endpoint. Only a small ZIP header sample was inspected;
-the complete dataset was not downloaded to this PC. Local tests use synthetic
-fixtures; no real-data training or DGX/H100 execution has been performed here.
-The remote environment report, full dataset audit, recording mapping and actual
-GPU smoke check remain the first deployment checks.
+The user-reported DGX environment check confirmed PyTorch 2.11.0 + CUDA 12.8,
+torchvision 0.26.0, and GPU access. Both pose and image GPU smoke tests passed.
+The full remote annotation audit found 120,279 records, all ten normalized
+classes, no malformed records, and no duplicate image IDs. That audit did not
+check image files; the full image download and image audit are not yet confirmed.
+No real-data training has been reported.
+
+The default temporal split also passed validation against the complete official
+annotation content on 2026-10-07, with the same SHA-256 as the DGX audit and the
+counts reported above. The 208,848,730 annotation bytes were read into memory;
+the annotation file and image archive were not saved on this development PC.
+Only the derived report was saved to `diagnostics/temporal_split_validation.json`.
+Generate the actual shared manifest on the DGX with `PREPARE_SPLITS.sh`.
+
+Local synthetic checks cover temporal exclusions, cross-class boundary gaps,
+shared assignments and manifest validation:
 
 ```bash
 python -B -m unittest discover -s tests -v
@@ -265,5 +329,5 @@ JIUJITSU_RUN_TORCH_TESTS=1 python -B -m unittest discover -s tests -v
 
 These require the project environment; other checks use Python's standard
 library. Both baseline integration checks have passed locally, including exact
-pose-resume equivalence to uninterrupted CPU execution. The PyTorch 2.11 / CUDA
-12.8 installation and GPU smoke check must still be run on the target DGX.
+pose-resume equivalence to uninterrupted CPU execution. Synthetic execution
+checks do not measure model quality on the real dataset.

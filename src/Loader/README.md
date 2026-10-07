@@ -2,9 +2,12 @@
 
 `splits.read_manifest(path, annotations_path, records)` verifies the annotation
 hash, exact image membership, 10-class taxonomy, and class coverage in all three
-partitions. It rebuilds the assignments from the saved recording-group evidence,
-rejecting edited assignments and recordings/camera views that cross partitions.
-Both classifiers consume this same manifest.
+partitions. For the default schema-2 temporal manifest, it rebuilds assignments,
+exclusions, boundaries and separation checks from saved source selections and
+parameters, rejecting edited derived fields. Excluded examples enter neither
+classifier. The schema-1 recording-group method remains supported and rebuilds
+assignments from its saved grouping evidence. Both classifiers consume exactly
+the same retained train/validation/test examples.
 
 `pose.pose_features(pose1, pose2, swap=False)` returns 102 floats: 34 joints with
 x, y, confidence. One bounding box over valid joints from both athletes supplies

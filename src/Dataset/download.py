@@ -18,6 +18,21 @@ import zlib
 BASE_URL = "https://data.vicos.si/datasets/JuiJuitsu/"
 SOURCES = {name: BASE_URL + name for name in ("annotations.json", "images.zip")}
 CHUNK = 1024 * 1024
+DOWNLOAD_PROGRESS_BYTES = 128 * CHUNK
+EXTRACT_PROGRESS_FILES = 5000
+
+
+def download_progress(name, completed, total, status="Download"):
+    amount = f"{completed:,} bytes"
+    if total is not None:
+        percent = 100 * completed / total if total else 100.0
+        amount = f"{completed:,}/{total:,} bytes ({percent:.1f}%)"
+    print(f"{status} {name}: {amount}.", flush=True)
+
+
+def extraction_progress(completed, total, written, existing, status="Extract images"):
+    print(f"{status}: {completed:,}/{total:,} files; "
+          f"newly written={written:,}, existing verified={existing:,}.", flush=True)
 
 
 def atomic_json(path, value):
@@ -100,7 +115,7 @@ def download_file(name, data_dir, timeout=60):
         raise ValueError("Download paths must not be symbolic links.")
     if target.exists():
         validate_download(target)
-        print(f"Preserving existing {target}.")
+        print(f"Preserving existing {target}; verifying its checksum.", flush=True)
         return provenance(target, url)
     state = json.loads(metadata.read_text(encoding="utf-8")) if metadata.exists() else {}
     if not isinstance(state, dict):
@@ -109,7 +124,10 @@ def download_file(name, data_dir, timeout=60):
         raise ValueError(f"Unrecognized partial download for {target}; move it aside before retrying.")
     offset = partial.stat().st_size if partial.exists() else 0
     if offset and offset == state.get("total_bytes"):
-        return publish_partial(partial, target, url, metadata)
+        download_progress(name, offset, offset, "Saved partial; verifying")
+        report = publish_partial(partial, target, url, metadata)
+        download_progress(name, offset, offset, "Download complete")
+        return report
     advertised = None
     try:
         request = urllib.request.Request(url, method="HEAD", headers={"Accept-Encoding": "identity"})
@@ -153,6 +171,8 @@ def download_file(name, data_dir, timeout=60):
             raise ValueError("Invalid advertised download size.")
         ensure_space(data_dir, max(0, (total or 0) - offset), f"Download {name}")
         received = 0
+        download_progress(name, offset, total, "Resume download" if offset else "Start download")
+        next_progress = offset + DOWNLOAD_PROGRESS_BYTES
         with partial.open("ab" if offset else "wb") as handle:
             # Truncate stale bytes before saving a new validator for a 200 restart.
             atomic_json(metadata, {"source_url": url, "etag": etag or (state.get("etag") if offset else None),
@@ -162,9 +182,15 @@ def download_file(name, data_dir, timeout=60):
                     raise ValueError("HTTP response exceeds its advertised length.")
                 handle.write(chunk)
                 received += len(chunk)
+                if offset + received >= next_progress:
+                    download_progress(name, offset + received, total)
+                    next_progress = offset + received + DOWNLOAD_PROGRESS_BYTES
         if (length is not None and received != length) or (total is not None and offset + received != total):
             raise OSError(f"Incomplete download of {name}; partial bytes preserved for retry.")
-    return publish_partial(partial, target, url, metadata)
+    download_progress(name, offset + received, total, "Transfer finished; verifying")
+    report = publish_partial(partial, target, url, metadata)
+    download_progress(name, offset + received, total, "Download complete")
+    return report
 
 
 def crc_file(path):
@@ -207,18 +233,26 @@ def extract_images(archive_path, destination):
     with zipfile.ZipFile(archive_path) as archive:
         entries = safe_entries(archive, destination)
         needed = 0
+        verified_existing = 0
+        files_total = sum(not info.is_dir() for info, _ in entries)
+        print(f"Checking extraction targets for {files_total:,} files.", flush=True)
         for info, target in entries:
             if target.exists():
                 valid = target.is_dir() if info.is_dir() else (
                     target.is_file() and target.stat().st_size == info.file_size and crc_file(target) == info.CRC)
                 if not valid:
                     raise ValueError(f"Existing extraction differs; refusing to overwrite {target}.")
+                if not info.is_dir():
+                    verified_existing += 1
+                    if verified_existing % EXTRACT_PROGRESS_FILES == 0:
+                        print(f"Extraction preflight: {verified_existing:,} existing files verified.", flush=True)
             elif not info.is_dir():
                 needed += info.file_size
         total = sum(info.file_size for info, _ in entries)
         print(f"ZIP uncompressed total={total:,} bytes; extracting under {destination}.")
         ensure_space(destination, needed, "Extract images")
-        written = 0
+        written, existing = 0, 0
+        extraction_progress(0, files_total, written, existing)
         for info, target in entries:
             if target.exists():
                 # Read ZIP data too, verifying its CRC even when output already exists.
@@ -226,6 +260,9 @@ def extract_images(archive_path, destination):
                     with archive.open(info) as source:
                         while source.read(CHUNK):
                             pass
+                    existing += 1
+                    if (written + existing) % EXTRACT_PROGRESS_FILES == 0:
+                        extraction_progress(written + existing, files_total, written, existing)
                 continue
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
@@ -242,9 +279,12 @@ def extract_images(archive_path, destination):
             finally:
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)
+            if (written + existing) % EXTRACT_PROGRESS_FILES == 0:
+                extraction_progress(written + existing, files_total, written, existing)
         roots = sorted({info.filename.split("/")[0] for info, _ in entries if "/" in info.filename.rstrip("/")})
+        extraction_progress(written + existing, files_total, written, existing, "Extraction complete")
         return {"images_dir": str(destination), "uncompressed_bytes": total,
-                "files_written": written, "files_total": sum(not info.is_dir() for info, _ in entries),
+                "files_written": written, "files_total": files_total,
                 "archive_subdirectories": roots}
 
 

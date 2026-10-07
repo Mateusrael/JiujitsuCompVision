@@ -17,7 +17,7 @@ unset project_overrides config_key
 DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/Data}"
 DIAGNOSTICS_DIR="${DIAGNOSTICS_DIR:-$PROJECT_ROOT/diagnostics}"
 TRAININGS_DIR="${TRAININGS_DIR:-$PROJECT_ROOT/trainings}"
-SPLIT_FILE="${SPLIT_FILE:-$DATA_DIR/splits/recording_split.json}"
+SPLIT_FILE="${SPLIT_FILE:-$DATA_DIR/splits/temporal_split.json}"
 if [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
     PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 else

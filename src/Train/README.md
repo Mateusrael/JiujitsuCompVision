@@ -8,6 +8,11 @@ two DataLoader workers, seed 42, CUDA. An unavailable GPU is an error; choose
 and unweighted cross entropy. Start image fine tuning with a smaller learning
 rate if needed, by choosing it at the start of a new run.
 
+The default shared manifest is `Data/splits/temporal_split.json`; records marked
+`excluded` never enter training or validation. Setup, image download and split
+preparation do not start training. Model architectures and optimization defaults
+are unchanged by the temporal evaluation protocol.
+
 Every fresh run requires a new `--run-dir`. Outputs are `config_start.json`,
 `checkpoints/best.pt`, `checkpoints/last.pt`, and `diagnostics/metrics.jsonl`.
 The resolved configuration and provenance capture model, labels, exact annotation

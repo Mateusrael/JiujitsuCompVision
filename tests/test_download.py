@@ -42,10 +42,13 @@ class DownloadTests(unittest.TestCase):
 
     def test_resume_validates_range_and_records_integrity(self):
         self.partial()
+        output = io.StringIO()
         response = Response(self.payload[5:], 206, **{
             "Content-Range": f"bytes 5-{len(self.payload)-1}/{len(self.payload)}",
             "Content-Length": str(len(self.payload)-5), "ETag": '"version1"'})
-        with patch.object(download.urllib.request, "urlopen", side_effect=[self.head(), response]) as request:
+        with patch.object(download.urllib.request, "urlopen", side_effect=[self.head(), response]) as request, \
+                contextlib.redirect_stdout(output), patch.object(download, "DOWNLOAD_PROGRESS_BYTES", 4), \
+                patch.object(download, "CHUNK", 4):
             result = download.download_file(self.name, self.directory)
         headers = request.call_args_list[1].args[0].headers
         self.assertEqual(headers["Range"], "bytes=5-")
@@ -53,6 +56,9 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual((self.directory / self.name).read_bytes(), self.payload)
         self.assertEqual(len(result["sha256"]), 64)
         self.assertFalse((self.directory / (self.name + ".part")).exists())
+        self.assertIn(f"Resume download {self.name}: 5/{len(self.payload)} bytes", output.getvalue())
+        self.assertIn(f"Download {self.name}: 9/{len(self.payload)} bytes", output.getvalue())
+        self.assertIn(f"Download complete {self.name}: {len(self.payload)}/{len(self.payload)} bytes (100.0%)", output.getvalue())
 
     def test_server_ignoring_range_restarts_without_duplicate_bytes(self):
         self.partial()
@@ -133,7 +139,11 @@ class DownloadTests(unittest.TestCase):
         archive = self.make_archive(["0101166.jpg", "nested/another.jpg"])
         destination = self.directory / "images"
         self.assertEqual(download.extract_images(archive, destination)["files_written"], 2)
-        self.assertEqual(download.extract_images(archive, destination)["files_written"], 0)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(download, "EXTRACT_PROGRESS_FILES", 1):
+            self.assertEqual(download.extract_images(archive, destination)["files_written"], 0)
+        self.assertIn("Extract images: 1/2 files; newly written=0, existing verified=1.", output.getvalue())
+        self.assertIn("Extraction complete: 2/2 files; newly written=0, existing verified=2.", output.getvalue())
         (destination / "0101166.jpg").write_bytes(b"other bytes")
         with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
             download.extract_images(archive, destination)
