@@ -2,6 +2,24 @@
 
 import math
 
+COCO_FLIP_INDICES = (0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15)
+
+
+def horizontal_flip_pose(features):
+    """Mirror 102 pair-centered features, exchanging each athlete's left/right joints.
+
+    Centered x changes sign; y and confidence move with their joint unchanged.
+    Athlete slots remain in the same order. The input is never modified.
+    """
+    if len(features) != 102:
+        raise ValueError("Horizontal pose flip expects 102 normalized features")
+    mirrored = []
+    for offset in (0, 51):
+        for joint in COCO_FLIP_INDICES:
+            start = offset + 3 * joint
+            mirrored.extend((-features[start], features[start + 1], features[start + 2]))
+    return mirrored
+
 
 def pose_features(pose1, pose2, *, swap=False):
     """Return 102 pair-normalized features; invalid joints become three zeros.

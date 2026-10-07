@@ -1,6 +1,6 @@
 # Jiu-jitsu position classification
 
-Compare a classifier using supplied athlete poses with an image classifier.
+Compare three classifiers using supplied athlete poses with an image classifier.
 The target environment is Linux with Python 3.11, PyTorch 2.11.0,
 torchvision 0.26.0 and CUDA 12.8. Setup creates an isolated project virtual
 environment. Training uses one GPU per process.
@@ -14,7 +14,7 @@ launchers/      editable paths and commands to run common operations
 src/
   Dataset/      annotation validation, audit, download, shared evaluation splits
   Loader/       paired-pose features and image loading
-  Modules/      pose MLP and ResNet-18
+  Modules/      two pose MLPs, joint self-attention and ResNet-18
   Train/        training, checkpointing, experiment metadata
   Eval/         classification metrics and evaluation
   Scripts/      command-line entry points and upload bundle creation
@@ -105,7 +105,7 @@ credentials in it. Launchers automatically select the project `.venv` unless
 
 ## Obtain and inspect data remotely
 
-Start with annotations, which serve both baselines:
+Start with annotations, which serve all four models:
 
 ```bash
 bash launchers/DOWNLOAD_DATA.sh
@@ -143,7 +143,7 @@ Skočaj, *Video-Based Detection of Combat Positions and Automatic Scoring in
 Jiu-jitsu*, MMSports 2022. Dataset files are downloaded separately and are not
 redistributed in this repository or bundle.
 
-## Create one split for both models
+## Create one split for all models
 
 The default is a **single-view temporal holdout within known videos**. It compares
 the models on later examples of the same classes in selected videos. It does not
@@ -170,7 +170,7 @@ video prefix for each normalized class:
 
 All other source views are excluded, as are incidental occurrences of a class
 outside its selected prefix. For example, a standing annotation in prefix `00`
-is excluded. Both classifiers use exactly the same retained examples.
+is excluded. All four classifiers use exactly the same retained examples.
 
 Within each class, records are ordered by their original frame numbers and
 provisionally divided into **70% train, 15% validation, and 15% test**. Around
@@ -200,7 +200,7 @@ The tool requires at least 20 retained examples of every class in each partition
 and stops if coverage or separation fails. It never silently reduces the gap or
 falls back to random frames. The manifest stores every image assignment,
 exclusion reason, source selection, boundary, coverage count and annotation hash.
-Both loaders reconstruct and verify the manifest before using it. Existing
+The pose and image loaders reconstruct and verify the manifest before using it. Existing
 manifests are never overwritten; use a new output path and update `SPLIT_FILE`
 when deliberately changing the protocol. See `--help` for explicit options.
 
@@ -229,8 +229,88 @@ Run a synthetic forward/backward smoke check inside the approved allocation:
 ```
 
 For a small CPU check when a GPU is not allocated, use `--device cpu` explicitly.
-The smoke check uses synthetic inputs and untrained image weights. Full image
-training uses pretrained ResNet-18 weights, requiring a download/cache on first use.
+The default smoke check exercises all four models using synthetic inputs and
+untrained image weights. Select one model with `--model pose`, `pose-wide`,
+`pose-attention`, or `image`; `--model both` retains the original pose/image check.
+Full image training uses pretrained ResNet-18 weights, requiring a download/cache
+on first use.
+
+### Model choices
+
+Every model classifies one frame into the same ten position categories. The three
+pose models receive the same 102 features: `(x, y, confidence)` for 17 joints of
+each athlete. Both athletes are centered and scaled together, missing joints
+remain zero, and confidence is clipped only during featurization. Athlete slots
+are randomly swapped with probability 0.5 during training by default. None of
+these models extracts poses from images or models changes across video frames.
+
+| CLI model | Architecture | Parameters updated during training |
+|---|---|---|
+| `pose` | `102 → 102 → 34 → 10`, ReLU after both hidden layers | All parameters, initialized randomly |
+| `pose-wide` | `102 → 512 → 128 → 32 → 10`, ReLU after all three hidden layers | All parameters, initialized randomly |
+| `pose-attention` | 34 joint tokens, four attention/MLP blocks, pooled features → 10 | All parameters, initialized randomly |
+| `image` | ImageNet-pretrained ResNet-18 with a replacement `512 → 10` classifier | New classifier only; `--fine-tune` also updates the backbone |
+
+Horizontal mirroring and dropout are optional for all four models and are
+**disabled by default**:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--horizontal-flip-prob` | `0.0` | Probability of mirroring a training example; `0.5` enables a 50% chance |
+| `--dropout` | `0.0` | Dropout probability during training; valid range [0, 1) |
+
+Image mirroring reverses the full frame horizontally before resize-and-pad.
+Pose mirroring negates normalized x and exchanges the COCO left/right joint
+slots within each athlete; y and confidence move with their joint unchanged.
+The mirror keeps athlete slots in place and is independent of the existing
+athlete-swap augmentation. No vertical flip is applied. Validation and test
+examples are never randomly mirrored or athlete-swapped.
+
+For the MLPs, dropout follows each hidden ReLU. For the image model, it acts on
+the 512 pooled features before the classifier, including when the backbone is
+frozen. For attention, it acts inside the attention/MLP blocks as described below.
+Dropout is disabled during validation and test evaluation; logits are never
+passed through a dropout layer.
+
+The attention model reshapes the common pose input into 34 joints. A shared
+`3 → 128` projection embeds each joint, then learned slot embeddings identify
+the joint and athlete slot. Each of its four blocks applies LayerNorm, four-head
+self-attention and a residual addition, followed by LayerNorm, a
+`128 → 512 → 128` MLP with GELU and another residual addition. Final LayerNorm
+and a mean over observed joints produce 128 features for the `128 → 10` classifier.
+Attention connects joints from both athletes within a single frame. Joints with
+nonpositive confidence are masked from attention keys and mean pooling. If all
+joints are missing, mean pooling returns zero and the classifier returns its bias.
+
+These defaults can be configured at the start of an attention run:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--attention-dim` | `128` | Joint embedding width; must be divisible by head count |
+| `--attention-heads` | `4` | Attention heads per block |
+| `--attention-layers` | `4` | Number of residual attention/MLP blocks |
+| `--attention-mlp-dim` | `512` | Hidden width of each block's MLP |
+| `--attention-dropout` | `0.0` | Attention weights and attention residual-output dropout |
+| `--attention-mlp-dropout` | `0.0` | Hidden and output dropout inside each block's MLP |
+| `--attention-pooling` | `mean` | Mean over observed joints; `cls` uses a learned classification token |
+
+The two attention dropout rates are independent and must be in [0, 1).
+`--dropout` provides a shared fallback for any branch whose specific flag is
+omitted. Each branch flag overrides that fallback, including an explicit zero.
+For example, `--dropout 0.2 --attention-dropout 0` disables attention dropout
+and keeps the block MLP dropout at 0.2. Without any dropout flags, both are zero.
+
+`--attention-pooling cls` prepends a learned token, making 35 tokens in total,
+and classifies its final representation instead of averaging the joints. All
+architecture choices are saved in the checkpoint and cannot change on resume.
+
+The image model preserves both athletes using resize-and-pad to 224 × 224 and
+ImageNet normalization. Its original ImageNet `512 → 1000` layer is removed;
+the new `512 → 10` classifier takes its place. The frozen backbone, including
+BatchNorm statistics, produces the 512 features. Use `--fine-tune` for a separate
+image experiment that updates the entire network, or `--no-pretrained` for an
+explicitly untrained image baseline or smoke check. See
+[the module documentation](src/Modules/README.md) for the architecture contracts.
 
 The following are training examples to run after preparing the data and shared
 split and choosing the model experiment. Setup and split preparation do not
@@ -238,15 +318,34 @@ start them automatically:
 
 ```bash
 RUN_NAME=pose-baseline bash launchers/START_TRAINING.sh --model pose --epochs 30
+```
+
+```bash
+RUN_NAME=pose-wide bash launchers/START_TRAINING.sh --model pose-wide --epochs 30
+```
+
+```bash
+RUN_NAME=pose-attention bash launchers/START_TRAINING.sh --model pose-attention --epochs 30
+```
+
+```bash
 RUN_NAME=image-baseline bash launchers/START_TRAINING.sh --model image --epochs 30
 ```
 
-The MLP takes 102 paired-pose features. Both athletes are centered and scaled
-together, missing joints remain zero, and confidence is clipped only during
-featurization. The image model preserves both athletes using resize-and-pad to
-224 × 224, starts with a pretrained ResNet-18 backbone and trains its new head.
-Use `--fine-tune` for a separate experiment that updates the backbone. Use
-`--no-pretrained` only for an explicitly untrained image baseline or smoke check.
+For an optional experiment with horizontal mirroring and dropout enabled:
+
+```bash
+RUN_NAME=pose-wide-mirror-dropout bash launchers/START_TRAINING.sh --model pose-wide --epochs 30 --horizontal-flip-prob 0.5 --dropout 0.2
+```
+
+Both flags also work with `pose`, `pose-attention`, and `image`. The examples
+without these flags retain mirroring and dropout at zero.
+
+For attention dropout of 0.1 and block MLP dropout of 0.3:
+
+```bash
+RUN_NAME=pose-attention-dropout bash launchers/START_TRAINING.sh --model pose-attention --epochs 30 --attention-dropout 0.1 --attention-mlp-dropout 0.3
+```
 
 CUDA is required by default; unavailable CUDA fails clearly. Data-loading workers,
 batch size, seed and learning rate can be set with CLI flags; see `--help`. Run
@@ -261,17 +360,30 @@ bash launchers/CONTINUE_TRAINING.sh --resume trainings/pose-baseline/checkpoints
 ```
 
 Checkpoints include model configuration, optimizer and random states. Saved
-configuration is reused on resume, with incompatible changes rejected. Best
-checkpoints are selected on validation data; test data is used by the explicit
+configuration is reused on resume, including the mirror probability and dropout
+rates; changing these requires a new run. Attention checkpoints record and
+restore the two effective branch rates independently. Best checkpoints are selected on
+validation data; test data is used by the explicit
 evaluation command:
 
 ```bash
 bash launchers/EVALUATE.sh --checkpoint trainings/pose-baseline/checkpoints/best.pt
+```
+
+```bash
+bash launchers/EVALUATE.sh --checkpoint trainings/pose-wide/checkpoints/best.pt
+```
+
+```bash
+bash launchers/EVALUATE.sh --checkpoint trainings/pose-attention/checkpoints/best.pt
+```
+
+```bash
 bash launchers/EVALUATE.sh --checkpoint trainings/image-baseline/checkpoints/best.pt
 ```
 
 Results include accuracy, macro-F1, per-class precision/recall/support and a
-confusion matrix. Supplied-pose MLP results assume pose annotations already exist;
+confusion matrix. Supplied-pose model results assume pose annotations already exist;
 they do not measure an image-to-pose pipeline or end-to-end inference speed.
 
 ## Git workflow and source bundles
@@ -300,7 +412,9 @@ bundle manifest alongside archived results when deploying by upload.
 ## Validation status
 
 The user-reported DGX environment check confirmed PyTorch 2.11.0 + CUDA 12.8,
-torchvision 0.26.0, and GPU access. Both pose and image GPU smoke tests passed.
+torchvision 0.26.0, and GPU access. The original `pose` and `image` GPU smoke
+tests passed. The new `pose-wide` and `pose-attention` models have not yet been
+reported as tested on the DGX; rerun the default smoke command to check all four.
 The full remote annotation audit found 120,279 records, all ten normalized
 classes, no malformed records, and no duplicate image IDs. That audit did not
 check image files; the full image download and image audit are not yet confirmed.
@@ -327,7 +441,16 @@ data only, without pretrained downloads:
 JIUJITSU_RUN_TORCH_TESTS=1 python -B -m unittest discover -s tests -v
 ```
 
-These require the project environment; other checks use Python's standard
-library. Both baseline integration checks have passed locally, including exact
-pose-resume equivalence to uninterrupted CPU execution. Synthetic execution
-checks do not measure model quality on the real dataset.
+These require an environment with PyTorch and torchvision; other checks use
+Python's standard library. On 2026-10-07, all 81 tests passed locally with no
+skips on CPU using PyTorch 2.8 and torchvision 0.23. They covered training,
+resume and evaluation for all four models with horizontal-mirror probability
+0.5 and dropout 0.1 (attention weight/output dropout 0.1 and block MLP dropout
+0.2), plus checkpoint reconstruction with nondefault attention settings.
+Separate checks covered independent dropout branches, explicit-zero overrides,
+and dropout being disabled during evaluation. Resumed CPU weights matched
+uninterrupted training exactly for every model, including the frozen ResNet
+classifier. The separate CPU
+forward/backward smoke check also passed for all four models. The new models
+still need the DGX smoke check in the target PyTorch 2.11/CUDA 12.8 environment.
+Synthetic execution checks do not measure model quality on the real dataset.

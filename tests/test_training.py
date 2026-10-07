@@ -64,8 +64,9 @@ def synthetic_files(root, *, images=False):
                             "pose2": [[float(j + 20), float(j), 1.1] for j in range(17)]})
             assignments[image_id] = part
             if images:
-                Image.new("RGB", (32, 24), (index * 20, part_index * 30, 100)).save(
-                    images_dir / f"{image_id}.png")
+                image = Image.new("RGB", (32, 24), (index * 20, part_index * 30, 100))
+                image.paste((index * 20, 255 - part_index * 30, 40), (0, 0, 8, 12))
+                image.save(images_dir / f"{image_id}.png")
     annotations.write_text(json.dumps(records), encoding="utf-8")
     groups = {"description": "Synthetic fixture: each prefix is a separately generated recording.",
               "sequences": {f"{index + 1:02d}": {"recording": f"synthetic-{part}", "split": part}
@@ -98,6 +99,97 @@ class TrainingConfigurationTests(unittest.TestCase):
         resume.seed = 8
         with self.assertRaisesRegex(ValueError, "seed"):
             resolve_settings(resume, settings)
+
+    def test_attention_settings_are_restored_and_cannot_change_on_resume(self):
+        parser = build_parser()
+        initial = parser.parse_args(["--model", "pose-attention", "--attention-dim", "48",
+            "--attention-heads", "3", "--attention-layers", "2", "--attention-mlp-dim", "80",
+            "--attention-dropout", "0.1", "--attention-mlp-dropout", "0.3",
+            "--attention-pooling", "cls"])
+        settings = resolve_settings(initial)
+        resume = parser.parse_args(["--model", "pose-attention", "--epochs", "30"])
+        restored = resolve_settings(resume, settings)
+        for name in ("attention_dim", "attention_heads", "attention_layers",
+                     "attention_mlp_dim", "attention_dropout", "attention_mlp_dropout",
+                     "attention_pooling"):
+            self.assertEqual(restored[name], settings[name])
+        for flag, value in (("--attention-dim", "96"), ("--attention-heads", "6"),
+                            ("--attention-layers", "3"), ("--attention-mlp-dim", "160"),
+                            ("--attention-dropout", "0"), ("--attention-mlp-dropout", "0"),
+                            ("--attention-pooling", "mean")):
+            with self.subTest(flag=flag):
+                changed = parser.parse_args(["--model", "pose-attention", flag, value])
+                with self.assertRaisesRegex(ValueError, "Cannot change"):
+                    resolve_settings(changed, settings)
+
+    def test_attention_flags_and_fine_tuning_reject_inapplicable_models(self):
+        parser = build_parser()
+        for name in ("pose", "pose-wide", "image"):
+            for flag, value in (("--attention-dim", "64"), ("--attention-dropout", "0.1"),
+                                ("--attention-mlp-dropout", "0.2")):
+                with self.subTest(model=name, flag=flag):
+                    with self.assertRaisesRegex(ValueError, "pose-attention"):
+                        resolve_settings(parser.parse_args(["--model", name, flag, value]))
+        for name in ("pose", "pose-wide", "pose-attention"):
+            with self.subTest(model=name):
+                with self.assertRaisesRegex(ValueError, "only to the image"):
+                    resolve_settings(parser.parse_args(["--model", name, "--fine-tune"]))
+
+    def test_invalid_attention_cli_settings_fail_before_loading_torch(self):
+        parser = build_parser()
+        for flags in (["--attention-dim", "31", "--attention-heads", "4"],
+                      ["--attention-heads", "0"], ["--attention-layers", "0"],
+                      ["--attention-mlp-dim", "-1"], ["--attention-dropout", "nan"],
+                      ["--attention-dropout", "1"], ["--attention-mlp-dropout", "-0.1"],
+                      ["--attention-mlp-dropout", "nan"], ["--attention-mlp-dropout", "1"]):
+            with self.subTest(flags=flags):
+                with self.assertRaises(ValueError):
+                    resolve_settings(parser.parse_args(["--model", "pose-attention"] + flags))
+
+    def test_dropout_and_horizontal_mirror_defaults_are_off_and_resume_is_fixed(self):
+        parser = build_parser()
+        for name in ("pose", "pose-wide", "pose-attention", "image"):
+            with self.subTest(model=name):
+                fresh = resolve_settings(parser.parse_args(["--model", name]))
+                self.assertEqual(fresh["dropout"], 0.0)
+                self.assertEqual(fresh["horizontal_flip_prob"], 0.0)
+                selected = resolve_settings(parser.parse_args([
+                    "--model", name, "--dropout", "0.2", "--horizontal-flip-prob", "0.5"]))
+                restored = resolve_settings(parser.parse_args(["--model", name]), selected)
+                self.assertEqual(restored["dropout"], 0.2)
+                self.assertEqual(restored["horizontal_flip_prob"], 0.5)
+                for flag in ("--dropout", "--horizontal-flip-prob"):
+                    with self.assertRaisesRegex(ValueError, "Cannot change"):
+                        resolve_settings(parser.parse_args(["--model", name, flag, "0"]), selected)
+
+    def test_attention_dropout_branches_use_independent_overrides_and_shared_fallback(self):
+        parser = build_parser()
+        cases = (([], (0.0, 0.0, 0.0)),
+                 (["--attention-dropout", "0.2"], (0.0, 0.2, 0.0)),
+                 (["--attention-mlp-dropout", "0.3"], (0.0, 0.0, 0.3)),
+                 (["--dropout", "0.4"], (0.4, 0.4, 0.4)),
+                 (["--dropout", "0.4", "--attention-dropout", "0"], (0.4, 0.0, 0.4)),
+                 (["--dropout", "0.4", "--attention-mlp-dropout", "0"], (0.4, 0.4, 0.0)),
+                 (["--dropout", "0.4", "--attention-dropout", "0.1",
+                   "--attention-mlp-dropout", "0.2"], (0.4, 0.1, 0.2)))
+        fields = ("dropout", "attention_dropout", "attention_mlp_dropout")
+        for flags, expected in cases:
+            with self.subTest(flags=flags):
+                settings = resolve_settings(parser.parse_args(["--model", "pose-attention"] + flags))
+                self.assertEqual(tuple(settings[field] for field in fields), expected)
+                restored = resolve_settings(parser.parse_args(["--model", "pose-attention"]), settings)
+                self.assertEqual(tuple(restored[field] for field in fields), expected)
+
+    def test_dropout_and_flip_probability_reject_invalid_values(self):
+        parser = build_parser()
+        for flag, values in (("--dropout", ("-0.1", "1", "nan", "inf")),
+                             ("--horizontal-flip-prob", ("-0.1", "1.1", "nan", "inf"))):
+            for value in values:
+                with self.subTest(flag=flag, value=value):
+                    with self.assertRaises(ValueError):
+                        resolve_settings(parser.parse_args(["--model", "pose", flag, value]))
+        self.assertEqual(resolve_settings(parser.parse_args([
+            "--model", "pose", "--horizontal-flip-prob", "1"]))["horizontal_flip_prob"], 1.0)
 
     def test_new_runs_do_not_reuse_directories(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -133,7 +225,7 @@ class TrainingConfigurationTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("JIUJITSU_RUN_TORCH_TESTS") == "1",
                      "Set JIUJITSU_RUN_TORCH_TESTS=1 for tiny CPU integration checks")
 class TorchIntegrationTests(unittest.TestCase):
-    def test_both_models_train_resume_and_evaluate(self):
+    def test_all_models_train_resume_and_evaluate(self):
         import torch
         from src.Eval.evaluate import evaluate
         from src.Scripts.evaluate import build_parser as evaluation_parser
@@ -143,13 +235,19 @@ class TorchIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             annotations, split, images_dir, _ = synthetic_files(root, images=True)
-            for name in ("pose", "image"):
+            for name in ("pose", "pose-wide", "pose-attention", "image"):
                 with self.subTest(model=name):
                     run = root / name
                     common = ["--model", name, "--annotations", str(annotations),
-                              "--split", str(split), "--device", "cpu"]
+                              "--split", str(split), "--device", "cpu",
+                              "--dropout", "0.1", "--horizontal-flip-prob", "0.5"]
                     if name == "image":
                         common += ["--images-dir", str(images_dir)]
+                    if name == "pose-attention":
+                        common += ["--attention-dim", "32", "--attention-heads", "2",
+                                   "--attention-layers", "2", "--attention-mlp-dim", "64",
+                                   "--attention-dropout", "0.1", "--attention-mlp-dropout", "0.2",
+                                   "--attention-pooling", "cls"]
                     train(build_parser().parse_args(common + ["--run-dir", str(run),
                         "--epochs", "1", "--workers", "0", "--batch-size", "10", "--no-pretrained"]))
                     last = run / "checkpoints" / "last.pt"
@@ -159,6 +257,25 @@ class TorchIntegrationTests(unittest.TestCase):
                     second = load_checkpoint(last)
                     self.assertEqual(second["epoch"], 2)
                     self.assertEqual(second["config"]["workers"], 0)
+                    self.assertEqual(second["config"]["dropout"], 0.1)
+                    self.assertEqual(second["config"]["horizontal_flip_prob"], 0.5)
+                    self.assertEqual(second["config"]["model_config"], first["config"]["model_config"])
+                    if name == "pose-attention":
+                        self.assertEqual(second["config"]["attention_dim"], 32)
+                        self.assertEqual(second["config"]["attention_heads"], 2)
+                        self.assertEqual(second["config"]["attention_layers"], 2)
+                        self.assertEqual(second["config"]["attention_mlp_dim"], 64)
+                        self.assertEqual(second["config"]["attention_dropout"], 0.1)
+                        self.assertEqual(second["config"]["attention_mlp_dropout"], 0.2)
+                        self.assertEqual(second["config"]["model_config"]["attention_dropout"], 0.1)
+                        self.assertEqual(second["config"]["model_config"]["mlp_dropout"], 0.2)
+                        self.assertNotIn("dropout", second["config"]["model_config"])
+                        self.assertEqual(second["config"]["attention_pooling"], "cls")
+                        for flag, value in (("--attention-dim", "64"), ("--attention-dropout", "0"),
+                                            ("--attention-mlp-dropout", "0")):
+                            with self.assertRaisesRegex(ValueError, f"Cannot change {flag}"):
+                                train(build_parser().parse_args([
+                                    "--resume", str(last), "--epochs", "3", flag, value]))
                     metrics = [json.loads(line) for line in
                                (run / "diagnostics" / "metrics.jsonl").read_text().splitlines()]
                     self.assertEqual([row["epoch"] for row in metrics], [1, 2])
@@ -170,15 +287,15 @@ class TorchIntegrationTests(unittest.TestCase):
                     self.assertEqual(result["split"], "test")
                     self.assertEqual(result["metrics"]["samples"], 10)
                     self.assertEqual(len(result["metrics"]["confusion_matrix"]), 10)
-                    if name == "pose":
-                        # Restore RNG+sampler state: a resumed run equals a continuous run.
-                        continuous = root / "continuous"
-                        train(build_parser().parse_args(common + ["--run-dir", str(continuous),
-                            "--epochs", "2", "--workers", "0", "--batch-size", "10", "--no-pretrained"]))
-                        uninterrupted = load_checkpoint(continuous / "checkpoints" / "last.pt")
-                        for key, value in second["model_state"].items():
-                            self.assertTrue(torch.equal(value, uninterrupted["model_state"][key]), key)
-
+                    self.assertEqual(result["model_config"], first["config"]["model_config"])
+                    # Restore RNG+sampler state, including dropout and mirroring:
+                    # every resumed model must equal its continuous CPU run.
+                    continuous = root / f"continuous-{name}"
+                    train(build_parser().parse_args(common + ["--run-dir", str(continuous),
+                        "--epochs", "2", "--workers", "0", "--batch-size", "10", "--no-pretrained"]))
+                    uninterrupted = load_checkpoint(continuous / "checkpoints" / "last.pt")
+                    for key, value in second["model_state"].items():
+                        self.assertTrue(torch.equal(value, uninterrupted["model_state"][key]), key)
 
 if __name__ == "__main__":
     unittest.main()

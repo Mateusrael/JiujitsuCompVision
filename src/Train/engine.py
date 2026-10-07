@@ -1,4 +1,4 @@
-"""Training and validation over the same verified split manifest for both models."""
+"""Training and validation over the same verified split manifest for all models."""
 
 import json
 import random
@@ -14,9 +14,10 @@ from src.Eval.metrics import classification_metrics
 from src.Loader.datasets import ImageDataset, PoseDataset
 from src.Loader.splits import read_manifest, split_records
 from src.Modules.models import architecture_config, build_model
+from src.Modules.registry import POSE_MODEL_NAMES
 from src.Train.checkpoints import (load_checkpoint, random_state, restore_random_state,
                                    save_checkpoint)
-from src.Train.config import resolve_run_dir, resolve_settings
+from src.Train.config import ATTENTION_DEFAULTS, resolve_run_dir, resolve_settings
 from src.Train.run_metadata import provenance, write_json
 
 
@@ -42,11 +43,15 @@ def seed_worker(worker_id):
 
 
 def make_dataset(model, records, config, *, training=False):
-    if model == "pose":
+    flip_probability = config.get("horizontal_flip_prob", 0.0) if training else 0.0
+    if model in POSE_MODEL_NAMES:
         return PoseDataset(records, config["class_names"], config["label_map"],
-                           swap_athletes=training and config["swap_athletes"])
+                           swap_athletes=training and config["swap_athletes"],
+                           horizontal_flip_prob=flip_probability)
+    if model != "image":
+        raise ValueError(f"Unknown model: {model!r}")
     return ImageDataset(records, config["class_names"], config["label_map"],
-                        config["images_dir"])
+                        config["images_dir"], horizontal_flip_prob=flip_probability)
 
 
 def make_loader(dataset, config, device, *, training=False, generator=None):
@@ -94,6 +99,13 @@ def train_epoch(model, loader, optimizer, device):
     return {"loss": loss_sum / samples, "accuracy": correct / samples, "samples": samples}
 
 
+def configured_architecture(model, num_classes, config):
+    options = ({name: config[name] for name in ATTENTION_DEFAULTS}
+               if model == "pose-attention" else {})
+    return architecture_config(model, num_classes, fine_tune=config["fine_tune"],
+                               dropout=config["dropout"], **options)
+
+
 def validate_checkpoint_data(config, model, annotations_path, split_path, manifest):
     expected = {"model": model, "annotation_sha256": sha256_file(annotations_path),
                 "split_sha256": sha256_file(split_path),
@@ -101,8 +113,7 @@ def validate_checkpoint_data(config, model, annotations_path, split_path, manife
     for key, value in expected.items():
         if config.get(key) != value:
             raise ValueError(f"Checkpoint {key} does not match this run's data/model/split")
-    model_config = architecture_config(model, len(manifest["class_names"]),
-                                       fine_tune=config["fine_tune"])
+    model_config = configured_architecture(model, len(manifest["class_names"]), config)
     if config.get("model_config") != model_config:
         raise ValueError("Checkpoint architecture/preprocessing configuration is unsupported")
 
@@ -132,8 +143,7 @@ def train(args):
     if checkpoint and images_dir != previous.get("images_dir"):
         raise ValueError("Cannot change the image directory while resuming")
     config.update({"schema_version": 1, "model": args.model,
-                   "model_config": architecture_config(args.model, len(manifest["class_names"]),
-                                                       fine_tune=config["fine_tune"]),
+                   "model_config": configured_architecture(args.model, len(manifest["class_names"]), config),
                    "annotations": str(annotations_path), "split": str(split_path),
                    "annotation_sha256": sha256_file(annotations_path),
                    "split_sha256": sha256_file(split_path),

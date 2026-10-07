@@ -6,6 +6,18 @@ split hash, class order, and raw-label mapping must match. Prefer `best.pt`, who
 epoch was selected using validation macro F1. Do not tune settings against test
 results; keep test evaluation for the final comparison.
 
+The model is reconstructed from its checkpoint, including all attention
+dimensions, block/head counts, separate attention and block MLP dropout rates,
+and pooling choices. Evaluation does not
+select a new architecture or download pretrained weights. `pose`, `pose-wide`
+and `pose-attention` all receive the same normalized 102 pose features; `image`
+receives the corresponding full frames. Every model returns ten logits, and the
+largest logit determines the predicted class. Pose results assume supplied
+skeletons and do not evaluate pose extraction or temporal video modeling.
+
+Evaluation disables dropout for all four models and never mirrors examples or
+swaps athlete slots, regardless of the saved training augmentation settings.
+
 The default temporal manifest measures held-out segments of selected known
 videos. Its unused frame gaps and single source per class reduce nearby-frame
 and additional-view overlap; they do not establish performance on independent

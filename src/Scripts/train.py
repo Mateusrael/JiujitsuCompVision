@@ -1,4 +1,4 @@
-"""Train either baseline; --help works before PyTorch is installed."""
+"""Train a pose or image classifier; --help works before PyTorch is installed."""
 
 import argparse
 import sys
@@ -7,12 +7,14 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.Modules.registry import MODEL_NAMES
+
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("pose", "image"), help="Required for a fresh run")
+    parser.add_argument("--model", choices=MODEL_NAMES, help="Required for a fresh run")
     parser.add_argument("--annotations", help="Required for a fresh run; restored on resume")
-    parser.add_argument("--split", help="Shared recording-group manifest; restored on resume")
+    parser.add_argument("--split", help="Shared split manifest; restored on resume")
     parser.add_argument("--images-dir", help="Directory containing seven-digit image filenames")
     parser.add_argument("--run-dir", help="New run directory; required unless resuming")
     parser.add_argument("--resume", help="Resume this run's checkpoints/last.pt (trusted files only)")
@@ -29,6 +31,21 @@ def build_parser():
                         help="Train image backbone too; by default train only its classifier head")
     parser.add_argument("--swap-athletes", action=argparse.BooleanOptionalAction, default=None,
                         help="Randomly swap pose slots during training (default: enabled for 10 classes)")
+    parser.add_argument("--horizontal-flip-prob", type=float,
+                        help="Training-only horizontal mirror probability for poses/images; default: 0 (off)")
+    parser.add_argument("--dropout", type=float,
+                        help="MLP hidden/image head dropout, or fallback for both attention branches; default: 0")
+    attention = parser.add_argument_group("pose-attention architecture (saved and restored on resume)")
+    attention.add_argument("--attention-dim", type=int, help="Token embedding width; default: 128")
+    attention.add_argument("--attention-heads", type=int, help="Attention heads per block; default: 4")
+    attention.add_argument("--attention-layers", type=int, help="Residual attention/MLP blocks; default: 4")
+    attention.add_argument("--attention-mlp-dim", type=int, help="Hidden width inside each block; default: 512")
+    attention.add_argument("--attention-dropout", type=float,
+                           help="Attention weight and attention residual-output dropout; overrides --dropout")
+    attention.add_argument("--attention-mlp-dropout", type=float,
+                           help="Hidden and output dropout inside each attention block's MLP; overrides --dropout")
+    attention.add_argument("--attention-pooling", choices=("mean", "cls"),
+                           help="Pool observed joints, or use an extra learned classification token; default: mean")
     return parser
 
 

@@ -7,10 +7,13 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.Modules.registry import MODEL_NAMES, POSE_MODEL_NAMES
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("pose", "image", "both"), default="both")
+    parser.add_argument("--model", choices=(*MODEL_NAMES, "both", "all"), default="all",
+                        help="Default: all four models; both retains the original pose/image check")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args(argv)
     import torch
@@ -19,9 +22,17 @@ def main(argv=None):
     torch.set_num_threads(1)
     seed_everything(42)
     device = resolve_device(args.device)
-    for name in (("pose", "image") if args.model == "both" else (args.model,)):
+    names = MODEL_NAMES if args.model == "all" else (
+        ("pose", "image") if args.model == "both" else (args.model,))
+    for name in names:
         model = build_model(architecture_config(name), pretrained=False).to(device).train()
-        features = torch.randn((2, 102) if name == "pose" else (2, 3, 224, 224), device=device)
+        if name in POSE_MODEL_NAMES:
+            joints = torch.randn((2, 34, 3), device=device)
+            joints[..., 2] = torch.rand((2, 34), device=device)
+            joints[0, 17:] = 0  # Exercise a missing athlete without changing the common input contract.
+            features = joints.flatten(1)
+        else:
+            features = torch.randn((2, 3, 224, 224), device=device)
         labels = torch.tensor([0, 1], device=device)
         optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=0.001)
         logits = model(features)
