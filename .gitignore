@@ -1,0 +1,29 @@
+# Local environments and Python caches
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.test-tmp/
+.coverage
+htmlcov/
+
+# Remote data and generated results
+Data/
+trainings/
+diagnostics/
+dist/
+/source_manifest.json
+*.part
+
+# Machine settings and credentials
+/jiujitsu_dgx_project_handoff.md
+.env
+.env.*
+!.env.example
+launchers/local_config.sh
+.ipynb_checkpoints/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

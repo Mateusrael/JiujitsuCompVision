@@ -1,0 +1,4 @@
+{
+  "description": "TEMPLATE ONLY: replace this text with authoritative evidence mapping exported video prefixes to original recordings and synchronized cameras. Populate sequences with verified recording IDs and train/val/test assignments; this empty template cannot produce a valid split.",
+  "sequences": {}
+}

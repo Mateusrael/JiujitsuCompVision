@@ -1,0 +1,5 @@
+# Used by the default CUDA 12.8 setup and optional cpu/cu126 installer modes.
+# Official compatible pair and wheel indexes verified 2026-10-07:
+# https://pytorch.org/get-started/previous-versions/#v2-11-0
+torch==2.11.0
+torchvision==0.26.0
