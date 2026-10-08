@@ -117,6 +117,36 @@ class ExportMetricsTests(unittest.TestCase):
         self.assertEqual(self.summary(manifest, run)["target_epochs"], 60)
         self.assertEqual(len(manifest["files"]), 4)
 
+    def test_group_scores_follow_the_pooled_best_epoch_and_legacy_columns_stay_blank(self):
+        rows = [metric(1, 0.8), metric(2, 0.7)]
+        for index, row in enumerate(rows):
+            row["val"]["by_evaluation_type"] = {
+                "held_out_view": {"accuracy": 0.9, "macro_f1": 0.9, "loss": 0.1, "samples": 60},
+                "unseen_moment": {"accuracy": 0.6 - index * 0.1, "macro_f1": 0.6 - index * 0.1,
+                                  "loss": 1.1 + index, "samples": 40}}
+        self.write("new/config_start.json", config_bytes(checkpoint_selection="pooled_validation_macro_f1",
+                                                         pose_filter="both_present"))
+        self.write("new/diagnostics/metrics.jsonl", metrics_bytes(*rows))
+        self.write("old/config_start.json", config_bytes())
+        self.write("old/diagnostics/metrics.jsonl", metrics_bytes(metric(1)))
+        manifest = export_metrics.build_export(self.trainings, self.output)
+        summary = self.summary(manifest, "new")
+        self.assertEqual(summary["best_epoch"], 1)
+        self.assertEqual(summary["best_val_held_out_view_macro_f1"], 0.9)
+        self.assertEqual(summary["best_val_unseen_moment_macro_f1"], 0.6)
+        self.assertEqual(summary["last_val_unseen_moment_macro_f1"], 0.5)
+        self.assertEqual(summary["last_val_held_out_view_samples"], 60)
+        self.assertEqual(summary["pose_filter"], "both_present")
+        with zipfile.ZipFile(self.output) as archive:
+            csv_rows = {row["run"]: row for row in csv.DictReader(
+                io.StringIO(archive.read("summary.csv").decode()))}
+        self.assertEqual(csv_rows["old"]["best_val_held_out_view_macro_f1"], "")
+        # A partially written/invalid grouped result must not look trustworthy.
+        rows[0]["val"]["by_evaluation_type"]["unseen_moment"]["samples"] = 39
+        warnings = []
+        self.assertEqual(export_metrics.metric_rows(metrics_bytes(rows[0]), warnings), [])
+        self.assertIn("do not sum", warnings[0])
+
     def test_resume_config_order_falls_back_to_filename_time_then_numeric_epoch(self):
         match = export_metrics.RESUME_NAME.fullmatch
         older = match("config_resume_epoch100_20261011T120000000000Z.json")

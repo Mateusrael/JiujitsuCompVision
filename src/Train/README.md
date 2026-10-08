@@ -4,9 +4,20 @@
 validation macro F1 on `val`, and never scores `test`. AdamW uses learning rate
 0.001 and weight decay 0.0001 by default. Defaults are 20 epochs, batch size 128,
 two DataLoader workers, seed 42, CUDA. An unavailable GPU is an error; choose
-`--device cpu` explicitly for a small test. All four classifiers use the same split
-and unweighted cross entropy. Start image fine tuning with a smaller learning
-rate if needed, by choosing it at the start of a new run.
+`--device cpu` explicitly for a small test. All four classifiers share temporal
+section roles and use unweighted cross entropy. Pose models require both
+athletes' supplied poses in training, validation and test; image models retain
+single-pose examples. Report the different eligible populations with results.
+Start image fine tuning with a smaller learning rate if needed, by choosing it
+at the start of a new run.
+
+For the default multiview split, validation also reports `held_out_view` and
+`unseen_moment` separately. The first evaluates other views of sections present
+in training; the second withholds every available view of a section. Best
+checkpoint selection uses macro F1 computed from the pooled validation images,
+not an average of the two subset scores. Both subsets are validation data and
+can guide model choices; neither includes test images. Complete subset metrics
+are saved under `val.by_evaluation_type` in each epoch's metrics record.
 
 Set optimizer settings with `--lr` and `--weight-decay`. Weight decay accepts
 finite nonnegative values, including zero to disable it. AdamW applies it to all
@@ -38,10 +49,13 @@ checkpoint state; its compiled wrapper is used for training and validation.
 Initial batches and new shapes may incur compilation overhead. Errors propagate
 instead of triggering a project-specific fallback to uncompiled execution.
 
-The default shared manifest is `Data/splits/temporal_split.json`; records marked
+The default shared manifest is `Data/splits/multiview_sections.json`; records marked
 `excluded` never enter training or validation. Setup, image download and split
 preparation do not start training. Model architectures and optimization defaults
-are independent of the temporal evaluation protocol.
+are independent of the section evaluation protocol. Start a new run after
+changing split assignments. Resuming a checkpoint trained on the legacy split
+would expose some new validation/test images through its earlier training;
+annotation and split hash checks reject such a mismatch.
 
 Fresh runs select `--model pose`, `pose-wide`, `pose-attention`, or `image`.
 All three pose models update every parameter from random initialization and use

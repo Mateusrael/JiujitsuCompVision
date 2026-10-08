@@ -6,6 +6,20 @@ split hash, class order, and raw-label mapping must match. Prefer `best.pt`, who
 epoch was selected using validation macro F1. Do not tune settings against test
 results; keep test evaluation for the final comparison.
 
+With the default multiview section manifest, results include pooled test metrics
+and separate scores for `held_out_view` and `unseen_moment`. The former evaluates
+camera views of sections that training saw from other cameras. The latter
+evaluates sections withheld from every available camera. Validation uses the
+same two categories on different sections; test examples never select epochs
+or hyperparameters. Each subset receives its own loss, accuracy, macro F1,
+per-class metrics, and confusion matrix.
+
+Pose models evaluate only examples with both athletes' supplied poses. The
+image classifier includes single-pose images, so its sample population differs.
+The manifest coordinates section assignments and reports counts for both
+populations. Scores are saved under `metrics`, with the subset breakdown under
+`metrics.by_evaluation_type`; the output also records sample eligibility counts.
+
 The model is reconstructed from its checkpoint, including all attention
 dimensions, block/head counts, separate attention and block MLP dropout rates,
 and pooling choices. Evaluation does not
@@ -29,11 +43,14 @@ checkpoint weights are loaded. `--compile-mode` accepts `default`,
 modes require `--compile`. The first batches may take longer to compile.
 The output's `execution` field records compilation, mode and progress settings.
 
-The default temporal manifest measures held-out segments of selected known
-videos. Its unused frame gaps and single source per class reduce nearby-frame
-and additional-view overlap; they do not establish performance on independent
-matches or new athletes. Report this scope alongside the metrics. Excluded
-examples are never evaluated.
+The default plan uses all 16 source videos in six related camera groups and
+distributes held-out sections throughout their timelines. Source-specific
+frame boundaries and temporal buffers coordinate views. Alignment is estimated
+from annotation landmarks, not independently verified frame synchronization;
+report that limitation alongside the metrics. Neither subset establishes
+performance on independent matches or new athletes. Excluded examples are
+never evaluated. Previous checkpoints must not be reused after changing split
+assignments because training may have exposed the new test frames.
 
 `metrics.classification_metrics(targets, predictions, class_names)` uses only the
 standard library. Results include accuracy, macro F1 over all declared classes,

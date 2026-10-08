@@ -52,7 +52,7 @@ class TemporalLoadingTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         read_manifest(split, annotations, records)
 
-    def test_direct_script_defaults_and_immutable_output(self):
+    def test_explicit_legacy_temporal_defaults_and_immutable_output(self):
         project = Path(__file__).resolve().parents[1]
         script = project / "src" / "Scripts" / "prepare_splits.py"
         with tempfile.TemporaryDirectory() as directory:
@@ -61,7 +61,7 @@ class TemporalLoadingTests(unittest.TestCase):
             records = fixture(count=2000)
             annotations.write_text(json.dumps(records), encoding="utf-8")
             command = [sys.executable, "-B", str(script), "--annotations", str(annotations),
-                       "--output", str(split)]
+                       "--output", str(split), "--method", "single-view-temporal"]
             result = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = read_manifest(split, annotations, records)
@@ -81,6 +81,54 @@ class TemporalLoadingTests(unittest.TestCase):
         command = [sys.executable, "-B", str(script), "--annotations", "unused", "--output", "unused"]
         for flags, message in ((["--groups", "groups.json"], "requires --method"),
                                (["--method", "recording-group"], "requires --groups")):
+            with self.subTest(flags=flags):
+                result = subprocess.run(command + flags, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+    def test_default_multiview_custom_plan_direct_script_and_immutable_output(self):
+        from tests.test_multiview import fixture as multiview_fixture
+
+        script = Path(__file__).resolve().parents[1] / "src" / "Scripts" / "prepare_splits.py"
+        records, plan = multiview_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            annotations, plan_path, output = root / "annotations.json", root / "plan.json", root / "split.json"
+            annotations.write_text(json.dumps(records), encoding="utf-8")
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            command = [sys.executable, "-B", str(script), "--annotations", str(annotations),
+                       "--section-plan", str(plan_path), "--output", str(output)]
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["split_method"], "multiview-sections")
+            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(manifest["section_plan"], plan)
+            self.assertEqual(manifest["annotation_sha256"], sha256_file(annotations))
+            for expected in ("Image population:", "Pose population (both athletes required):",
+                             "Retained shares:", "val/held_out_view:", "test/unseen_moment:",
+                             "classes=10/10", "missing_pose=", "temporal_buffer="):
+                self.assertIn(expected, result.stdout)
+            saved = output.read_bytes()
+            rerun = subprocess.run(command, cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(rerun.returncode, 0)
+            self.assertIn("already exists", rerun.stderr)
+            self.assertEqual(output.read_bytes(), saved)
+
+    def test_split_specific_options_are_not_silently_ignored(self):
+        script = Path(__file__).resolve().parents[1] / "src" / "Scripts" / "prepare_splits.py"
+        command = [sys.executable, "-B", str(script), "--annotations", "unused", "--output", "unused"]
+        cases = [
+            (["--fractions", "0.7", "0.15", "0.15"], "require --method single-view-temporal"),
+            (["--gap-frames", "150"], "require --method single-view-temporal"),
+            (["--min-samples-per-class", "20"], "require --method single-view-temporal"),
+            (["--class-sources", "sources.json"], "require --method single-view-temporal"),
+            (["--method", "single-view-temporal", "--section-plan", "plan.json"],
+             "requires --method multiview-sections"),
+            (["--method", "recording-group", "--groups", "groups.json", "--gap-frames", "150"],
+             "require --method single-view-temporal"),
+        ]
+        for flags, message in cases:
             with self.subTest(flags=flags):
                 result = subprocess.run(command + flags, capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0)

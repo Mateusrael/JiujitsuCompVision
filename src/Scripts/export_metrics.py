@@ -18,11 +18,17 @@ ROOT = Path(__file__).resolve().parents[2]
 RESUME_NAME = re.compile(r"config_resume_epoch(\d+)_(.+)\.json\Z")
 SETTINGS = ("model", "lr", "weight_decay", "dropout", "attention_dropout",
             "attention_mlp_dropout", "horizontal_flip_prob", "batch_size", "seed",
-            "fine_tune", "compile", "annotation_sha256", "split_sha256")
+            "fine_tune", "compile", "annotation_sha256", "split_sha256", "pose_filter",
+            "checkpoint_selection")
+EVALUATION_TYPES = ("held_out_view", "unseen_moment")
+GROUP_SCORES = ("accuracy", "loss", "macro_f1", "samples")
+GROUP_SUMMARY_FIELDS = tuple(f"{stage}_val_{kind}_{score}"
+                            for stage in ("best", "last")
+                            for kind in EVALUATION_TYPES for score in GROUP_SCORES)
 SUMMARY_FIELDS = ("run", *SETTINGS, "target_epochs", "epochs_logged", "last_epoch",
                   "best_epoch", "best_val_macro_f1", "best_val_accuracy", "best_val_loss",
                   "last_train_accuracy", "last_train_loss", "last_val_accuracy",
-                  "last_val_loss", "last_val_macro_f1", "warnings")
+                  "last_val_loss", "last_val_macro_f1", *GROUP_SUMMARY_FIELDS, "warnings")
 
 
 def reject_nonfinite(value):
@@ -77,6 +83,20 @@ def metric_rows(content, warnings):
                     value = row[group][key]
                     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                         raise ValueError(f"invalid {group}.{key}")
+            grouped = row["val"].get("by_evaluation_type")
+            if grouped is not None:
+                if not isinstance(grouped, dict) or set(grouped) != set(EVALUATION_TYPES):
+                    raise ValueError("invalid val.by_evaluation_type groups")
+                for kind in EVALUATION_TYPES:
+                    for key in GROUP_SCORES:
+                        value = grouped[kind][key]
+                        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                                or not math.isfinite(value)):
+                            raise ValueError(f"invalid val.by_evaluation_type.{kind}.{key}")
+                    if not isinstance(grouped[kind]["samples"], int) or grouped[kind]["samples"] < 1:
+                        raise ValueError(f"invalid val.by_evaluation_type.{kind}.samples")
+                if sum(grouped[kind]["samples"] for kind in EVALUATION_TYPES) != row["val"]["samples"]:
+                    raise ValueError("evaluation type sample counts do not sum to validation samples")
         except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
             warnings.append(f"Invalid metrics line {index}; excluded from summary ({exc})")
             continue
@@ -118,6 +138,9 @@ def summarize(name, files, warnings):
         for group, keys in (("train", ("accuracy", "loss")),
                             ("val", ("accuracy", "loss", "macro_f1"))):
             summary.update({f"last_{group}_{key}": last[group][key] for key in keys})
+        for stage, row in (("best", best), ("last", last)):
+            for kind, scores in row["val"].get("by_evaluation_type", {}).items():
+                summary.update({f"{stage}_val_{kind}_{key}": scores[key] for key in GROUP_SCORES})
     summary["warnings"] = " | ".join(warnings)
     return summary
 

@@ -21,6 +21,12 @@ LABEL_MAP_10 = {
 CLASS_NAMES_10 = sorted(set(LABEL_MAP_10.values()))
 
 
+def both_poses_present(record):
+    """A supplied pose is observed when at least one joint has positive confidence."""
+    return all(any(point[2] > 0 for point in (record.get(name) or []))
+               for name in ("pose1", "pose2"))
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:

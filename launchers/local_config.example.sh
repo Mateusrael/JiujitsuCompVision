@@ -4,5 +4,5 @@
 # DATA_DIR="/your/persistent/storage/jiujitsu"
 # DIAGNOSTICS_DIR="/your/persistent/storage/jiujitsu-reports"
 # TRAININGS_DIR="/your/persistent/storage/jiujitsu-runs"
-# SPLIT_FILE="$DATA_DIR/splits/temporal_split.json"
+# SPLIT_FILE="$DATA_DIR/splits/multiview_sections.json"
 # PYTHON="/path/to/approved/environment/bin/python"

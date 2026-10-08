@@ -1,2 +1,4 @@
 # Training and evaluation progress reporting, installed from PyPI.
 tqdm==4.67.1
+# Deterministic section allocation; also used by torchvision.
+numpy>=1.24,<3

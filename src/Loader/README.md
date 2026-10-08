@@ -2,12 +2,17 @@
 
 `splits.read_manifest(path, annotations_path, records)` verifies the annotation
 hash, exact image membership, 10-class taxonomy, and class coverage in all three
-partitions. For the default schema-2 temporal manifest, it rebuilds assignments,
-exclusions, boundaries and separation checks from saved source selections and
-parameters, rejecting edited derived fields. Excluded examples enter none of the
-models. The schema-1 recording-group method remains supported and rebuilds
-assignments from its saved grouping evidence. All four classifiers consume
-exactly the same retained train/validation/test examples.
+partitions. The default schema-3 multi-view manifest rebuilds section allocation,
+paired-view eligibility, population counts and buffers from its saved plan and
+the annotations, rejecting edited derived fields. Schema-2 temporal and schema-1
+recording-group manifests remain supported for historical results.
+
+All models share temporal sections. The image model uses the main assignments;
+pose models additionally require two observed poses in every partition, and a
+complete-pose training counterpart for held-out-view evaluation. `pose_assignments`
+can only exclude main-assignment records, never move them to another partition.
+`split_records` optionally selects an evaluation type; `filter_pose_records`
+applies the pose eligibility rules. Training/validation/test remain disjoint.
 
 `pose.pose_features(pose1, pose2, swap=False)` returns 102 floats: 34 joints with
 x, y, confidence. One bounding box over valid joints from both athletes supplies
@@ -25,8 +30,9 @@ mapping for a 102-element feature vector. Both augmentations preserve labels
 under the supported 10-class mapping and make independent random choices.
 `pose`, `pose-wide` and `pose-attention` all use this dataset and its `(B, 102)`
 batch contract. The attention model reshapes the features into 34 joint tokens
-inside the model; it does not introduce a separate feature pipeline or exclude
-missing-pose examples. Confidence <= 0 supplies its missing-joint mask.
+inside the model; it does not introduce a separate feature pipeline. All three
+pose training/evaluation entry points remove records missing either athlete's
+observed pose. Confidence <= 0 still supplies the attention model's joint mask.
 
 `datasets.ImageDataset` requires exactly one `<image>.jpg`, `.jpeg`, or `.png`
 directly under the supplied image directory. It resizes the entire frame with

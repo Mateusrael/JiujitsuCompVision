@@ -19,7 +19,7 @@ src/
   Eval/         classification metrics and evaluation
   Scripts/      command-line entry points and upload bundle creation
 tests/          small checks using synthetic data
-docs/           recording-map template
+docs/           versioned multiview section plan and recording-map template
 Data/           remote dataset and split manifests (ignored by Git)
 trainings/      per-run config, checkpoints and diagnostics (ignored)
 diagnostics/    environment and dataset reports (ignored)
@@ -153,76 +153,127 @@ redistributed in this repository or bundle.
 
 ## Create one split for all models
 
-The default is a **single-view temporal holdout within known videos**. It compares
-the models on later examples of the same classes in selected videos. It does not
-measure generalization to new matches or athletes. The supplied audit shows that
-some classes appear in only two video prefixes, so assigning complete videos to
-three partitions cannot give every partition all ten classes. Camera grouping
-and synchronization are not independently verified.
+The default **multiview section split** targets **80% training, 10% validation,
+and 10% test** among retained annotated images. It uses all 16 sources, grouped
+as `00–02`, `03–05`, `06–08`, `09–10`, `11–13`, and `14–15`. Contiguous evaluation
+sections are distributed throughout the recordings instead of always holding
+out the latest examples of each class. All four models share the section
+boundaries and train/validation/test roles; pose models additionally require
+both athletes' supplied poses in every partition. Image training retains
+single-pose images. The split balances both eligible populations toward the
+80/10/10 target, including the retained examples of each class separately, so
+their exact sample counts differ. A class's training percentage is its retained
+training count divided by its retained train + validation + test count; it is
+not that class's share of the entire training set.
 
 ```bash
 bash launchers/PREPARE_SPLITS.sh
 ```
 
-This creates `Data/splits/temporal_split.json`. The source selection uses one
-video prefix for each normalized class:
+This creates `Data/splits/multiview_sections.json` from the versioned plan in
+[`docs/multiview_sections.json`](docs/multiview_sections.json). A deterministic
+assignment process balances the plan's candidate sections against the image
+and pose populations together, using annotation counts and pose availability.
+It does not use model predictions or evaluation scores. Each validation and test partition contains two
+separately reported subsets:
 
-| Video prefix | Selected classes |
-|---|---|
-| `00` | open guard, closed guard |
-| `03` | 50-50 guard, half guard |
-| `06` | mount, side control |
-| `09` | turtle |
-| `11` | standing, takedown |
-| `14` | back |
+| Evaluation type | What training can see | Target share of all retained images |
+|---|---|---:|
+| Validation: `held_out_view` | Other camera views of the same section | 5% |
+| Validation: `unseen_moment` | No camera view from that section | 5% |
+| Test: `held_out_view` | Other camera views of the same section | 5% |
+| Test: `unseen_moment` | No camera view from that section | 5% |
 
-All other source views are excluded, as are incidental occurrences of a class
-outside its selected prefix. For example, a standing annotation in prefix `00`
-is excluded. All four classifiers use exactly the same retained examples.
+Held-out views rotate across cameras. Unseen-moment sections withhold every
+available view together. Sections use class transitions and large annotation
+gaps where possible, with additional boundaries inside long class stretches.
+The default buffer removes 75 reference frames on each side of boundaries
+touching an evaluation section, for a total width of 150 frames across views.
+Held-out-view samples require another training camera with the same normalized
+class within three reference frames; samples without a counterpart are excluded.
+Missing-pose frames can occupy the temporal buffers, reducing how many usable
+pose examples a boundary removes. Those frames remain usable by the image model
+outside buffers, so they do not replace the temporal gap required for images.
+The buffer audit distinguishes annotated images already missing an athlete
+from buffered images with both poses.
 
-Within each class, records are ordered by their original frame numbers and
-provisionally divided into **70% train, 15% validation, and 15% test**. Around
-every change of partition within each selected video, including changes between
-different classes, the tool removes an embargo of 75 frames on either side of
-the boundary midpoint. It then verifies that retained frames in different
-partitions are **more than 150 frames apart**, approximately five seconds at the
-dataset's roughly 30 fps. Ratios change after these exclusions. This interval
-reduces neighboring-frame overlap; it does not establish event independence.
+Whole sections make the ratios approximate. The plan's `max_class_deviation`
+sets the maximum absolute difference between each class's retained train/val/test
+shares and the requested targets, separately for image and pose populations.
+The versioned default plan sets `0.025`, allowing at most 2.5 percentage points
+of deviation. Custom plans that omit the field use `0.04` (4 percentage points).
+Allocation fails without creating a
+manifest if it cannot meet the limit and the coverage/separation requirements;
+revise the candidate sections before retrying. It does not silently relax the
+limit or split individual frames at random.
 
-Validation on **2026-10-07** against all 120,279 official annotations produced:
+The preparation command reports counts and percentages for every class, the
+worst and RMS class deviations in percentage points, buffer costs, exclusions,
+and coverage for each evaluation type in both populations. For pose
+held-out-view evaluation, an eligible training view must also have both poses.
 
-| Partition | Retained examples |
-|---|---:|
-| Train | 31,093 |
-| Validation | 5,235 |
-| Test | 6,138 |
+The plan defines sections on an estimated common reference clock. Each source's
+original frame number is mapped with `reference = (frame - offset) / scale`;
+the scale and offset were inferred from label transitions and annotation gaps.
+Related cameras need not share original frame numbers. The source groups were reviewed visually, but
+exact frame synchronization has not been independently verified. Gray gaps in
+the annotation timeline mean no released annotation, not necessarily an
+unclassified original frame. Neither evaluation type holds out whole matches
+or athletes; report results as alternative-view and unseen-section evaluation
+within the known recordings, with this alignment limitation.
 
-All ten classes are present in every partition; the smallest class/partition
-combination is validation takedown with 106 examples. The minimum separation is
-151 frames in every selected prefix. Another 77,813 examples are excluded:
-74,675 by source selection and 3,138 by the temporal embargo. These counts apply
-to annotation SHA-256
-`b7633ed161372bef7d0dcdd2cb3bc69400147b6a2532a4a5b8070048a1dd62bc`.
+The schema-3 manifest stores the complete plan, annotation hash, image
+assignments, pose eligibility, exclusion reasons, and pooled/per-type class
+counts for both populations. It also audits retained temporal separation and
+paired-view distances, per-class balance, and the pose eligibility of buffered
+images. For substantial class stretches, the distribution audit checks combined
+validation/test coverage in the early, middle and late thirds separately for
+images and eligible poses. Image checks require at least 20 released annotations
+in all three thirds and then require 20 evaluation images per third. Pose checks
+use those same thirds and require 20 evaluation examples in each third with at
+least 20 available complete-pose examples; an unsupported pose third is skipped
+individually.
+Both populations use the same estimated reference clock. The pose and image loaders rebuild and verify
+these derived values before using the split.
+Existing manifests are never overwritten. To try a revised section plan, use
+`--section-plan path/to/plan.json --output path/to/new_split.json` and point
+`SPLIT_FILE` at the new manifest.
 
-The tool requires at least 20 retained examples of every class in each partition
-and stops if coverage or separation fails. It never silently reduces the gap or
-falls back to random frames. The manifest stores every image assignment,
-exclusion reason, source selection, boundary, coverage count and annotation hash.
-The pose and image loaders reconstruct and verify the manifest before using it. Existing
-manifests are never overwritten; use a new output path and update `SPLIT_FILE`
-when deliberately changing the protocol. See `--help` for explicit options.
+**Start fresh training runs after changing the split.** Models from the previous
+split may already have trained on images assigned to the new validation/test
+sets. Do not resume those checkpoints or use them for the new held-out results.
+Checkpoint selection still uses pooled validation macro F1, with the two
+validation subsets also reported separately each epoch. Test remains reserved
+for explicit final evaluation.
 
-For data with verified recording metadata and enough independent recordings per
-class, the original recording-group method remains available explicitly:
+### Legacy split methods
+
+The previous single-view chronological 70/15/15 method remains available
+explicitly. It keeps one source per class and removes a 150-frame temporal
+embargo around partition changes. Existing `temporal_split.json` files are
+left untouched:
+
+```bash
+bash launchers/PREPARE_SPLITS.sh --method single-view-temporal --output "$PWD/Data/splits/legacy_temporal_split.json"
+```
+
+Only that method accepts `--class-sources`, `--fractions`, `--gap-frames`, and
+`--min-samples-per-class`. Multiview parameters belong in its section plan.
+To use an existing legacy manifest, explicitly set `SPLIT_FILE` to its path.
+Check any existing `launchers/local_config.sh` or environment override before
+starting a new run, because explicit paths take precedence over the new default.
+
+For verified recording metadata and enough independent recordings per class,
+the recording-group method keeps all views of each recording together and
+requires every class in every partition:
 
 ```bash
 bash launchers/PREPARE_SPLITS.sh --method recording-group --groups "$PWD/Data/recording_groups.json" --output "$PWD/Data/splits/recording_split.json"
 ```
 
 Use `docs/recording_groups.example.json` as the metadata template and set
-`SPLIT_FILE` to this separate manifest in your local launcher configuration.
-That method keeps all views of a recording together and still requires every
-class in every partition.
+`SPLIT_FILE` to that separate manifest. This method evaluates different recording
+groups rather than the within-recording sections used by the default.
 
 ## Smoke tests and training
 
@@ -376,6 +427,11 @@ disables the bars, which is useful for redirected logs; `--progress` enables the
 again. Startup data/model preparation and compilation can precede the first
 completed batch.
 
+Multiview runs also print validation macro F1 for `held_out_view` and
+`unseen_moment` and save each subset's full metrics under
+`val.by_evaluation_type`. The usual `val` metrics pool both subsets, and pooled
+validation macro F1 selects `best.pt`.
+
 Compilation is optional and **off by default** for all four models. Add
 `--compile` to pass the **whole model** to `torch.compile` using PyTorch's
 default Inductor backend; there are no block-level compile decorators:
@@ -395,8 +451,9 @@ Compiler errors are surfaced; the project does not silently switch compilation o
 CUDA is required by default; unavailable CUDA fails clearly. Data-loading workers,
 batch size, seed, learning rate and weight decay can be set with CLI flags; see `--help`. Run
 directories are separate and must be new. Keep the seed and split fixed when
-comparing models. Missing poses are represented explicitly instead of excluding
-those samples from one side of the comparison.
+comparing models. Pose models exclude samples missing either athlete's pose
+from training, validation and test. Images retain these samples, so compare
+results alongside their reported sample counts and eligibility rules.
 
 AdamW defaults to `--lr 0.001 --weight-decay 0.0001`. Weight decay must be finite
 and nonnegative; zero disables it. It applies to all trainable parameters,
@@ -456,8 +513,11 @@ bash launchers/EVALUATE.sh --checkpoint trainings/image-baseline/checkpoints/bes
 ```
 
 Results include accuracy, macro-F1, per-class precision/recall/support and a
-confusion matrix. Supplied-pose model results assume pose annotations already exist;
-they do not measure an image-to-pose pipeline or end-to-end inference speed.
+confusion matrix. Multiview evaluation saves pooled test scores and a
+`by_evaluation_type` breakdown for held-out views and unseen moments, including
+each subset's loss and class support. Supplied-pose model results assume pose
+annotations already exist; they do not measure an image-to-pose pipeline or
+end-to-end inference speed.
 
 ## Export training metrics
 
@@ -523,8 +583,8 @@ bundle manifest alongside archived results when deploying by upload.
 
 ## Testing
 
-Run the synthetic tests for annotations, temporal exclusions, cross-class
-boundary gaps, shared assignments, manifest validation and result exports:
+Run the synthetic tests for annotations, multiview sections, legacy temporal
+exclusions, shared assignments, manifest validation and result exports:
 
 ```bash
 python -B -m unittest discover -s tests -v
@@ -537,8 +597,8 @@ data only, without pretrained downloads:
 JIUJITSU_RUN_TORCH_TESTS=1 python -B -m unittest discover -s tests -v
 ```
 
-The integration tests require PyTorch, torchvision and tqdm; other checks use
-Python's standard library. They cover training, resume and evaluation for all
+Split allocation and its tests require NumPy. The integration tests also require
+PyTorch, torchvision and tqdm. They cover training, resume and evaluation for all
 four models, augmentation, configurable weight decay, independent dropout
 branches and checkpoint reconstruction with nondefault attention settings.
 They verify that resumed CPU weights match uninterrupted training and that
