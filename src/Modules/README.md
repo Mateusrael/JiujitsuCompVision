@@ -110,3 +110,19 @@ pooling, learned slot order, masking, activation, normalization and preprocessin
 Resume preserves these choices and evaluation rebuilds the saved architecture.
 MLP and image model contracts record their single `dropout` rate. All contracts
 must match the complete configuration produced by `architecture_config`.
+
+## Optional compiled execution
+
+`execution.compile_model(model, enabled=False, mode="default")` returns the
+original model when disabled or `torch.compile(model, mode=mode)` when enabled.
+The whole classifier is passed to the compiler. Architectures and their blocks
+have no compile decorators. `COMPILE_MODES` lists `default`, `reduce-overhead`,
+`max-autotune`, and `max-autotune-no-cudagraphs`;
+`validate_compile_settings(enabled, mode)` validates the execution options
+without importing PyTorch.
+
+Callers retain the original model for optimizer parameters and checkpoint state,
+using the returned wrapper for forward execution. Loading restores raw weights
+before optionally compiling. Compilation is separate from `architecture_config`
+and can be switched on/off without changing model state keys. Initial calls can
+compile lazily; the helper reports this and preserves compiler error details.

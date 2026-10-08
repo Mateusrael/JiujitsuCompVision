@@ -8,6 +8,24 @@ two DataLoader workers, seed 42, CUDA. An unavailable GPU is an error; choose
 and unweighted cross entropy. Start image fine tuning with a smaller learning
 rate if needed, by choosing it at the start of a new run.
 
+Progress reporting uses `tqdm.auto`: an overall epoch bar and separate batch bars
+for training and validation. They show counts, percentage, throughput, elapsed
+time and ETA. Batch postfixes show sample-weighted running loss and accuracy;
+the epoch postfix shows training loss, validation accuracy and macro F1. The
+completed-epoch summary is still printed and flushed. `--no-progress` hides the
+bars; `--progress` is the default. Progress does not alter sampling or metrics.
+`train_epoch` and `score_model` accept keyword arguments `progress`, `description`
+and `position` for display control. `score_model` also supplies the held-out test
+evaluation bar.
+
+`--compile` enables `torch.compile` for the complete model; the default is
+`--no-compile`. `--compile-mode` accepts `default`, `reduce-overhead`,
+`max-autotune`, or `max-autotune-no-cudagraphs`. Nondefault modes require enabled
+compilation. The original model owns the optimizer parameters and supplies the
+checkpoint state; its compiled wrapper is used for training and validation.
+Initial batches and new shapes may incur compilation overhead. Errors propagate
+instead of triggering a project-specific fallback to uncompiled execution.
+
 The default shared manifest is `Data/splits/temporal_split.json`; records marked
 `excluded` never enter training or validation. Setup, image download and split
 preparation do not start training. Model architectures and optimization defaults
@@ -59,6 +77,9 @@ effective attention dropout rates are saved and restored independently.
 `--epochs` means total
 target epochs and can be increased; model, annotation/split hashes, taxonomy,
 architecture, and image directory must match. Device can be changed explicitly.
+Compilation, compile mode and progress can also be changed on resume, with
+omitted flags restoring the saved choices. Switching compilation on or off does
+not change the checkpoint format, but can change floating point and RNG behavior.
 Each continuation writes its own config record. Checkpoints save optimizer,
 epoch, best validation score, Python/Torch/CUDA and loader-generator random state.
 No NumPy random generator is used. Completed-epoch resume restores these states;

@@ -68,13 +68,21 @@ bash launchers/CHECK_ENVIRONMENT.sh --require-torch --require-cuda
 ```
 
 The default setup creates `.venv` without system-site packages and installs
-`torch==2.11.0` and `torchvision==0.26.0` from the official CUDA 12.8 wheel index.
+`torch==2.11.0` and `torchvision==0.26.0` from the official CUDA 12.8 wheel index,
+plus the pinned `tqdm` progress dependency from PyPI.
 It checks package versions, their imports and the PyTorch CUDA runtime build.
 No system packages, NVIDIA drivers or system CUDA toolkit are installed.
 The corresponding explicit installer command is:
 
 ```bash
 bash install/install.sh --torch cu128
+```
+
+After updating an existing DGX checkout, install the progress dependency without
+reinstalling PyTorch:
+
+```bash
+.venv/bin/python -m pip install -r install/requirements-runtime.txt
 ```
 
 The pinned package pair and CUDA 12.8 wheels are listed in
@@ -235,6 +243,15 @@ untrained image weights. Select one model with `--model pose`, `pose-wide`,
 Full image training uses pretrained ResNet-18 weights, requiring a download/cache
 on first use.
 
+To check optional whole-model compilation on the DGX as well:
+
+```bash
+.venv/bin/python -m src.Scripts.smoke_test --device cuda --compile
+```
+
+This exercises both training forward/backward and evaluation forward passes.
+The initial passes can take longer while PyTorch compiles the model graphs.
+
 ### Model choices
 
 Every model classifies one frame into the same ten position categories. The three
@@ -347,6 +364,31 @@ For attention dropout of 0.1 and block MLP dropout of 0.3:
 RUN_NAME=pose-attention-dropout bash launchers/START_TRAINING.sh --model pose-attention --epochs 30 --attention-dropout 0.1 --attention-mlp-dropout 0.3
 ```
 
+Training shows an overall epoch progress bar and a batch bar for each training
+and validation phase. Batch bars include percentage, batch count, elapsed time,
+estimated remaining time, throughput, running loss and running accuracy. The
+epoch bar shows the latest training loss, validation accuracy and validation
+macro F1. Epoch summaries and saved metrics remain available. `--no-progress`
+disables the bars, which is useful for redirected logs; `--progress` enables them
+again. Startup data/model preparation and compilation can precede the first
+completed batch.
+
+Compilation is optional and **off by default** for all four models. Add
+`--compile` to pass the **whole model** to `torch.compile` using PyTorch's
+default Inductor backend; there are no block-level compile decorators:
+
+```bash
+RUN_NAME=pose-attention-compiled bash launchers/START_TRAINING.sh --model pose-attention --epochs 30 --compile
+```
+
+`--compile-mode` accepts `default` (the default), `reduce-overhead`,
+`max-autotune`, or `max-autotune-no-cudagraphs`. A nondefault mode requires
+compilation to be enabled. Initial training/validation passes and new input
+shapes can trigger compilation, so early ETA estimates can be inflated. Speed
+gains depend on the model and workload. See the
+[PyTorch compile options](https://docs.pytorch.org/docs/2.11/generated/torch.compile.html).
+Compiler errors are surfaced; the project does not silently switch compilation off.
+
 CUDA is required by default; unavailable CUDA fails clearly. Data-loading workers,
 batch size, seed and learning rate can be set with CLI flags; see `--help`. Run
 directories are separate and must be new. Keep the seed and split fixed when
@@ -369,6 +411,19 @@ evaluation command:
 ```bash
 bash launchers/EVALUATE.sh --checkpoint trainings/pose-baseline/checkpoints/best.pt
 ```
+
+Compilation and progress are execution settings: they can be overridden on resume
+with `--compile` / `--no-compile`, `--compile-mode`, and
+`--progress` / `--no-progress`. Omitted flags reuse the run's saved choices.
+Checkpoints always save the original model's state, so they can be resumed or
+evaluated with or without compilation. Changing execution mode can change floating
+point results and random-number behavior; bitwise reproducibility is not promised
+across compiled and uncompiled execution.
+
+Evaluation has its own batch progress bar and uses uncompiled execution by default,
+even for a checkpoint trained with compilation. Add `--compile` and optionally
+`--compile-mode` to the evaluation command to compile the reconstructed whole model,
+or use `--no-progress` to suppress its bar.
 
 ```bash
 bash launchers/EVALUATE.sh --checkpoint trainings/pose-wide/checkpoints/best.pt
@@ -412,20 +467,23 @@ bundle manifest alongside archived results when deploying by upload.
 ## Validation status
 
 The user-reported DGX environment check confirmed PyTorch 2.11.0 + CUDA 12.8,
-torchvision 0.26.0, and GPU access. The original `pose` and `image` GPU smoke
-tests passed. The new `pose-wide` and `pose-attention` models have not yet been
-reported as tested on the DGX; rerun the default smoke command to check all four.
+torchvision 0.26.0, and GPU access. On 2026-10-07 the user reported passing GPU
+smoke tests for all four models: `pose`, `pose-wide`, `pose-attention`, and `image`.
+These checks used uncompiled execution. Compiled CUDA execution still needs its
+separate smoke check in the target environment.
 The full remote annotation audit found 120,279 records, all ten normalized
 classes, no malformed records, and no duplicate image IDs. That audit did not
 check image files; the full image download and image audit are not yet confirmed.
-No real-data training has been reported.
+No real-data training results have been reported.
 
 The default temporal split also passed validation against the complete official
 annotation content on 2026-10-07, with the same SHA-256 as the DGX audit and the
 counts reported above. The 208,848,730 annotation bytes were read into memory;
 the annotation file and image archive were not saved on this development PC.
 Only the derived report was saved to `diagnostics/temporal_split_validation.json`.
-Generate the actual shared manifest on the DGX with `PREPARE_SPLITS.sh`.
+The user also generated the shared DGX manifest successfully: 31,093 training,
+5,235 validation, 6,138 test and 77,813 excluded examples, with a minimum retained
+cross-partition separation of 151 frames.
 
 Local synthetic checks cover temporal exclusions, cross-class boundary gaps,
 shared assignments and manifest validation:
@@ -441,8 +499,8 @@ data only, without pretrained downloads:
 JIUJITSU_RUN_TORCH_TESTS=1 python -B -m unittest discover -s tests -v
 ```
 
-These require an environment with PyTorch and torchvision; other checks use
-Python's standard library. On 2026-10-07, all 81 tests passed locally with no
+These require an environment with PyTorch, torchvision and tqdm; other checks use
+Python's standard library. On 2026-10-07, all 91 tests passed locally with no
 skips on CPU using PyTorch 2.8 and torchvision 0.23. They covered training,
 resume and evaluation for all four models with horizontal-mirror probability
 0.5 and dropout 0.1 (attention weight/output dropout 0.1 and block MLP dropout
@@ -451,6 +509,10 @@ Separate checks covered independent dropout branches, explicit-zero overrides,
 and dropout being disabled during evaluation. Resumed CPU weights matched
 uninterrupted training exactly for every model, including the frozen ResNet
 classifier. The separate CPU
-forward/backward smoke check also passed for all four models. The new models
-still need the DGX smoke check in the target PyTorch 2.11/CUDA 12.8 environment.
+forward/backward smoke check also passed for all four models.
+Progress-on/off checks preserve weights, metrics and RNG state exactly.
+Whole-model compilation checks exercise real TorchDynamo graph capture with
+the CPU `eager` backend for all four models, plus checkpoint portability and
+runtime-option overrides. These do not validate native CUDA/Inductor compilation
+or establish a speedup; use the compiled DGX smoke command for that execution path.
 Synthetic execution checks do not measure model quality on the real dataset.

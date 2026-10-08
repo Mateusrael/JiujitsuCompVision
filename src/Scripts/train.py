@@ -8,6 +8,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.Modules.registry import MODEL_NAMES
+from src.Modules.execution import COMPILE_MODES
 
 
 def build_parser():
@@ -25,6 +26,12 @@ def build_parser():
     parser.add_argument("--seed", type=int, help="Fresh default: 42; preserved on resume")
     parser.add_argument("--device", choices=("cuda", "cpu"),
                         help="Fresh default: cuda; use cpu explicitly for small tests")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None,
+                        help="Compile the whole model with torch.compile; fresh default: disabled")
+    parser.add_argument("--compile-mode", choices=COMPILE_MODES,
+                        help="torch.compile mode; fresh default: default; requires compilation")
+    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=None,
+                        help="Show epoch and batch progress bars; fresh default: enabled")
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=None,
                         help="ImageNet ResNet-18 weights (default); --no-pretrained permits offline smoke")
     parser.add_argument("--fine-tune", action=argparse.BooleanOptionalAction, default=None,

@@ -93,6 +93,8 @@ if torch.version.cuda != expected_cuda:
 print(f"Verified torch {torch.__version__}, torchvision {torchvision.__version__}, CUDA {torch.version.cuda}")
 PY
 fi
+"$venv/bin/python" -m pip --isolated install --require-virtualenv --no-cache-dir \
+    --index-url "https://pypi.org/simple" -r "$script_dir/requirements-runtime.txt"
 "$venv/bin/python" "$script_dir/check_environment.py" --require-torch
 printf '\nSetup complete. Activate with:\n  source %q/bin/activate\n' "$venv"
 printf 'Run the environment probe inside your approved GPU allocation before using CUDA.\n'

@@ -18,6 +18,17 @@ skeletons and do not evaluate pose extraction or temporal video modeling.
 Evaluation disables dropout for all four models and never mirrors examples or
 swaps athlete slots, regardless of the saved training augmentation settings.
 
+The test batch progress bar is enabled by default and shows running loss and
+accuracy, batch counts, throughput, elapsed time and ETA. `--no-progress` hides
+it. Final accuracy and macro F1 are still printed and saved.
+
+Evaluation defaults to uncompiled execution independently of the training run.
+`--compile` wraps the entire reconstructed model with `torch.compile` after its
+checkpoint weights are loaded. `--compile-mode` accepts `default`,
+`reduce-overhead`, `max-autotune`, or `max-autotune-no-cudagraphs`; nondefault
+modes require `--compile`. The first batches may take longer to compile.
+The output's `execution` field records compilation, mode and progress settings.
+
 The default temporal manifest measures held-out segments of selected known
 videos. Its unused frame gaps and single source per class reduce nearby-frame
 and additional-view overlap; they do not establish performance on independent

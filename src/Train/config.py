@@ -4,11 +4,13 @@ import math
 from pathlib import Path
 
 from src.Modules.registry import POSE_MODEL_NAMES
+from src.Modules.execution import validate_compile_settings
 
 
 DEFAULTS = {"epochs": 20, "batch_size": 128, "lr": 0.001, "workers": 2,
             "seed": 42, "pretrained": True, "fine_tune": False,
-            "swap_athletes": True, "horizontal_flip_prob": 0.0, "dropout": 0.0}
+            "swap_athletes": True, "horizontal_flip_prob": 0.0, "dropout": 0.0,
+            "compile": False, "compile_mode": "default", "progress": True}
 RESUME_FIXED = ("batch_size", "lr", "workers", "seed", "pretrained",
                 "fine_tune", "swap_athletes", "horizontal_flip_prob", "dropout")
 ATTENTION_DEFAULTS = {"attention_dim": 128, "attention_heads": 4, "attention_layers": 4,
@@ -27,6 +29,12 @@ def resolve_settings(args, previous=None):
             if supplied is not None and supplied != saved:
                 raise ValueError(f"Cannot change --{name.replace('_', '-')} when resuming")
         resolved[name] = supplied if supplied is not None else saved
+    validate_compile_settings(resolved["compile"], resolved["compile_mode"])
+    if (not resolved["compile"]
+            and getattr(args, "compile_mode", None) not in (None, "default")):
+        raise ValueError("A nondefault --compile-mode requires --compile")
+    if not isinstance(resolved["progress"], bool):
+        raise ValueError("progress must be a boolean")
     if resolved["epochs"] < 1 or resolved["batch_size"] < 1:
         raise ValueError("epochs and batch-size must be positive")
     if resolved["workers"] < 0 or resolved["seed"] < 0:

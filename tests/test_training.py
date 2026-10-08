@@ -240,7 +240,7 @@ class TorchIntegrationTests(unittest.TestCase):
                     run = root / name
                     common = ["--model", name, "--annotations", str(annotations),
                               "--split", str(split), "--device", "cpu",
-                              "--dropout", "0.1", "--horizontal-flip-prob", "0.5"]
+                              "--dropout", "0.1", "--horizontal-flip-prob", "0.5", "--no-progress"]
                     if name == "image":
                         common += ["--images-dir", str(images_dir)]
                     if name == "pose-attention":
@@ -283,7 +283,7 @@ class TorchIntegrationTests(unittest.TestCase):
                     chosen = load_checkpoint(best)
                     self.assertEqual(chosen["best_macro_f1"], max(row["val"]["macro_f1"] for row in metrics))
                     result = evaluate(evaluation_parser().parse_args([
-                        "--checkpoint", str(best), "--device", "cpu"]))
+                        "--checkpoint", str(best), "--device", "cpu", "--no-progress"]))
                     self.assertEqual(result["split"], "test")
                     self.assertEqual(result["metrics"]["samples"], 10)
                     self.assertEqual(len(result["metrics"]["confusion_matrix"]), 10)

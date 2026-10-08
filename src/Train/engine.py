@@ -2,17 +2,20 @@
 
 import json
 import random
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from src.Dataset.annotations import load_annotations, sha256_file
 from src.Eval.metrics import classification_metrics
 from src.Loader.datasets import ImageDataset, PoseDataset
 from src.Loader.splits import read_manifest, split_records
+from src.Modules.execution import compile_model
 from src.Modules.models import architecture_config, build_model
 from src.Modules.registry import POSE_MODEL_NAMES
 from src.Train.checkpoints import (load_checkpoint, random_state, restore_random_state,
@@ -61,39 +64,59 @@ def make_loader(dataset, config, device, *, training=False, generator=None):
                       persistent_workers=False)
 
 
-def score_model(model, loader, device, class_names):
+def score_model(model, loader, device, class_names, *, progress=True,
+                description="validation", position=0):
     model.eval()
-    loss_sum, targets, predictions = 0.0, [], []
-    with torch.inference_mode():
+    loss_sum, correct, targets, predictions = 0.0, 0, [], []
+    with torch.inference_mode(), tqdm(
+            total=len(loader), desc=description, unit="batch", leave=False,
+            dynamic_ncols=True, mininterval=0.2, miniters=1,
+            disable=not progress, position=position) as batches:
         for features, labels in loader:
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             logits = model(features)
             loss = torch.nn.functional.cross_entropy(logits, labels, reduction="sum")
             loss_sum += loss.item()
-            targets.extend(labels.cpu().tolist())
-            predictions.extend(logits.argmax(dim=1).cpu().tolist())
+            batch_targets = labels.cpu().tolist()
+            batch_predictions = logits.argmax(dim=1).cpu().tolist()
+            targets.extend(batch_targets)
+            predictions.extend(batch_predictions)
+            if progress:
+                correct += sum(target == prediction
+                               for target, prediction in zip(batch_targets, batch_predictions))
+                batches.set_postfix(loss=f"{loss_sum / len(targets):.4f}",
+                                    accuracy=f"{correct / len(targets):.4f}", refresh=False)
+            batches.update(1)
     metrics = classification_metrics(targets, predictions, class_names)
     metrics["loss"] = loss_sum / len(targets)
     return metrics
 
 
-def train_epoch(model, loader, optimizer, device):
+def train_epoch(model, loader, optimizer, device, *, progress=True,
+                description="train", position=0):
     model.train()
     loss_sum, correct, samples = 0.0, 0, 0
-    for features, labels in loader:
-        features = features.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(features)
-        loss = torch.nn.functional.cross_entropy(logits, labels)
-        if not torch.isfinite(loss):
-            raise RuntimeError("Nonfinite training loss; inspect the inputs and learning rate")
-        loss.backward()
-        optimizer.step()
-        samples += labels.numel()
-        loss_sum += loss.item() * labels.numel()
-        correct += (logits.argmax(dim=1) == labels).sum().item()
+    with tqdm(total=len(loader), desc=description, unit="batch", leave=False,
+              dynamic_ncols=True, mininterval=0.2, miniters=1,
+              disable=not progress, position=position) as batches:
+        for features, labels in loader:
+            features = features.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(features)
+            loss = torch.nn.functional.cross_entropy(logits, labels)
+            if not torch.isfinite(loss):
+                raise RuntimeError("Nonfinite training loss; inspect the inputs and learning rate")
+            loss.backward()
+            optimizer.step()
+            samples += labels.numel()
+            loss_sum += loss.item() * labels.numel()
+            correct += (logits.argmax(dim=1) == labels).sum().item()
+            if progress:
+                batches.set_postfix(loss=f"{loss_sum / samples:.4f}",
+                                    accuracy=f"{correct / samples:.4f}", refresh=False)
+            batches.update(1)
     if not samples:
         raise ValueError("The training split is empty")
     return {"loss": loss_sum / samples, "accuracy": correct / samples, "samples": samples}
@@ -130,6 +153,7 @@ def train(args):
             setattr(args, name, saved)
     config = resolve_settings(args, previous)
     device = resolve_device(args.device or (previous or {}).get("device", "cuda"))
+    print(f"Preparing {args.model} data and model on {device}...", flush=True)
     annotations_path = Path(args.annotations).expanduser().resolve()
     split_path = Path(args.split).expanduser().resolve()
     records = load_annotations(annotations_path)
@@ -176,6 +200,9 @@ def train(args):
         restore_random_state(checkpoint["random_state"], generators)
     else:
         run_dir.mkdir(parents=True, exist_ok=False)
+    # Keep the original module for optimizer ownership and portable state dicts.
+    # The execution wrapper compiles the complete model, including its classifier.
+    runtime_model = compile_model(model, enabled=config["compile"], mode=config["compile_mode"])
     (run_dir / "checkpoints").mkdir(exist_ok=True)
     (run_dir / "diagnostics").mkdir(exist_ok=True)
     event_file = "config_start.json" if not checkpoint else (
@@ -195,23 +222,38 @@ def train(args):
             if row["epoch"] <= start_epoch:
                 kept.append(json.dumps(row, allow_nan=False))
         metrics_path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-    for epoch in range(start_epoch + 1, config["epochs"] + 1):
-        started = time.monotonic()
-        training = train_epoch(model, loaders["train"], optimizer, device)
-        validation = score_model(model, loaders["val"], device, config["class_names"])
-        improved = validation["macro_f1"] > best_macro_f1
-        best_macro_f1 = max(best_macro_f1, validation["macro_f1"])
-        row = {"epoch": epoch, "train": training, "val": validation,
-               "seconds": time.monotonic() - started, "best_macro_f1": best_macro_f1}
-        with metrics_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, allow_nan=False) + "\n")
-        payload = {"schema_version": 1, "config": config, "epoch": epoch,
-                   "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
-                   "best_macro_f1": best_macro_f1, "random_state": random_state(generators)}
-        if improved:
-            save_checkpoint(run_dir / "checkpoints" / "best.pt", payload)
-        save_checkpoint(run_dir / "checkpoints" / "last.pt", payload)
-        print(f"epoch {epoch}/{config['epochs']} | train loss {training['loss']:.4f} | "
-              f"val accuracy {validation['accuracy']:.4f} | val macro F1 "
-              f"{validation['macro_f1']:.4f}", flush=True)
+    with tqdm(total=config["epochs"], initial=start_epoch, desc=f"{args.model} epochs",
+              unit="epoch", dynamic_ncols=True, disable=not config["progress"],
+              position=0) as epochs:
+        for epoch in range(start_epoch + 1, config["epochs"] + 1):
+            started = time.monotonic()
+            training = train_epoch(
+                runtime_model, loaders["train"], optimizer, device,
+                progress=config["progress"], description=f"train {epoch}/{config['epochs']}",
+                position=1)
+            validation = score_model(
+                runtime_model, loaders["val"], device, config["class_names"],
+                progress=config["progress"], description=f"val {epoch}/{config['epochs']}",
+                position=1)
+            improved = validation["macro_f1"] > best_macro_f1
+            best_macro_f1 = max(best_macro_f1, validation["macro_f1"])
+            row = {"epoch": epoch, "train": training, "val": validation,
+                   "seconds": time.monotonic() - started, "best_macro_f1": best_macro_f1}
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, allow_nan=False) + "\n")
+            payload = {"schema_version": 1, "config": config, "epoch": epoch,
+                       "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
+                       "best_macro_f1": best_macro_f1, "random_state": random_state(generators)}
+            if improved:
+                save_checkpoint(run_dir / "checkpoints" / "best.pt", payload)
+            save_checkpoint(run_dir / "checkpoints" / "last.pt", payload)
+            if config["progress"]:
+                epochs.set_postfix(loss=f"{training['loss']:.4f}",
+                                   val_acc=f"{validation['accuracy']:.4f}",
+                                   val_f1=f"{validation['macro_f1']:.4f}", refresh=False)
+            epochs.update(1)
+            tqdm.write(f"epoch {epoch}/{config['epochs']} | train loss {training['loss']:.4f} | "
+                       f"val accuracy {validation['accuracy']:.4f} | val macro F1 "
+                       f"{validation['macro_f1']:.4f}")
+            sys.stdout.flush()
     return run_dir
