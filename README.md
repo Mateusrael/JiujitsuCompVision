@@ -367,8 +367,11 @@ RUN_NAME=pose-attention-dropout bash launchers/START_TRAINING.sh --model pose-at
 Training shows an overall epoch progress bar and a batch bar for each training
 and validation phase. Batch bars include percentage, batch count, elapsed time,
 estimated remaining time, throughput, running loss and running accuracy. The
-epoch bar shows the latest training loss, validation accuracy and validation
-macro F1. Epoch summaries and saved metrics remain available. `--no-progress`
+epoch bar and printed epoch summary show training loss and accuracy, validation
+loss and accuracy, and validation macro F1. All five metrics are also saved in
+`diagnostics/metrics.jsonl`, including in existing runs. Training metrics are
+averaged during updates with augmentation/dropout active; validation uses the
+final epoch weights in evaluation mode. `--no-progress`
 disables the bars, which is useful for redirected logs; `--progress` enables them
 again. Startup data/model preparation and compilation can precede the first
 completed batch.

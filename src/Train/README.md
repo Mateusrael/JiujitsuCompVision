@@ -11,8 +11,13 @@ rate if needed, by choosing it at the start of a new run.
 Progress reporting uses `tqdm.auto`: an overall epoch bar and separate batch bars
 for training and validation. They show counts, percentage, throughput, elapsed
 time and ETA. Batch postfixes show sample-weighted running loss and accuracy;
-the epoch postfix shows training loss, validation accuracy and macro F1. The
-completed-epoch summary is still printed and flushed. `--no-progress` hides the
+the epoch postfix and completed-epoch summary show training loss and accuracy,
+validation loss and accuracy, and validation macro F1. These metrics are also
+saved in `diagnostics/metrics.jsonl` under `train` and `val`; existing runs already
+contain them. Training metrics average predictions made during parameter updates
+with training augmentations/dropout active. Validation scores the final epoch
+weights in evaluation mode without random augmentation. The completed-epoch
+summary is printed and flushed. `--no-progress` hides the
 bars; `--progress` is the default. Progress does not alter sampling or metrics.
 `train_epoch` and `score_model` accept keyword arguments `progress`, `description`
 and `position` for display control. `score_model` also supplies the held-out test

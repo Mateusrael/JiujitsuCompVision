@@ -248,11 +248,15 @@ def train(args):
                 save_checkpoint(run_dir / "checkpoints" / "best.pt", payload)
             save_checkpoint(run_dir / "checkpoints" / "last.pt", payload)
             if config["progress"]:
-                epochs.set_postfix(loss=f"{training['loss']:.4f}",
+                epochs.set_postfix(train_loss=f"{training['loss']:.4f}",
+                                   train_acc=f"{training['accuracy']:.4f}",
+                                   val_loss=f"{validation['loss']:.4f}",
                                    val_acc=f"{validation['accuracy']:.4f}",
                                    val_f1=f"{validation['macro_f1']:.4f}", refresh=False)
             epochs.update(1)
             tqdm.write(f"epoch {epoch}/{config['epochs']} | train loss {training['loss']:.4f} | "
+                       f"train accuracy {training['accuracy']:.4f} | "
+                       f"val loss {validation['loss']:.4f} | "
                        f"val accuracy {validation['accuracy']:.4f} | val macro F1 "
                        f"{validation['macro_f1']:.4f}")
             sys.stdout.flush()
