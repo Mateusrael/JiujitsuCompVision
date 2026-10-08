@@ -191,7 +191,7 @@ def train(args):
     model = build_model(config["model_config"],
                         pretrained=config["pretrained"] and checkpoint is None).to(device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),
-                                  lr=config["lr"], weight_decay=0.0001)
+                                  lr=config["lr"], weight_decay=config["weight_decay"])
     best_macro_f1 = -1.0
     if checkpoint:
         model.load_state_dict(checkpoint["model_state"], strict=True)

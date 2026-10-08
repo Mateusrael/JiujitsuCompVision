@@ -22,6 +22,8 @@ def build_parser():
     parser.add_argument("--epochs", type=int, help="Total target epochs; fresh default: 20")
     parser.add_argument("--batch-size", type=int, help="Fresh default: 128")
     parser.add_argument("--lr", type=float, help="Fresh default: 0.001")
+    parser.add_argument("--weight-decay", type=float,
+                        help="AdamW weight decay; finite and nonnegative; fresh default: 0.0001")
     parser.add_argument("--workers", type=int, help="DataLoader workers; fresh default: 2")
     parser.add_argument("--seed", type=int, help="Fresh default: 42; preserved on resume")
     parser.add_argument("--device", choices=("cuda", "cpu"),

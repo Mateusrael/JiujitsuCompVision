@@ -7,11 +7,12 @@ from src.Modules.registry import POSE_MODEL_NAMES
 from src.Modules.execution import validate_compile_settings
 
 
-DEFAULTS = {"epochs": 20, "batch_size": 128, "lr": 0.001, "workers": 2,
+DEFAULTS = {"epochs": 20, "batch_size": 128, "lr": 0.001, "weight_decay": 0.0001,
+            "workers": 2,
             "seed": 42, "pretrained": True, "fine_tune": False,
             "swap_athletes": True, "horizontal_flip_prob": 0.0, "dropout": 0.0,
             "compile": False, "compile_mode": "default", "progress": True}
-RESUME_FIXED = ("batch_size", "lr", "workers", "seed", "pretrained",
+RESUME_FIXED = ("batch_size", "lr", "weight_decay", "workers", "seed", "pretrained",
                 "fine_tune", "swap_athletes", "horizontal_flip_prob", "dropout")
 ATTENTION_DEFAULTS = {"attention_dim": 128, "attention_heads": 4, "attention_layers": 4,
                       "attention_mlp_dim": 512, "attention_dropout": 0.0,
@@ -41,6 +42,10 @@ def resolve_settings(args, previous=None):
         raise ValueError("workers and seed must be nonnegative")
     if not 0 < resolved["lr"] < float("inf"):
         raise ValueError("lr must be positive and finite")
+    weight_decay = resolved["weight_decay"]
+    if (isinstance(weight_decay, bool) or not isinstance(weight_decay, (int, float))
+            or not math.isfinite(weight_decay) or weight_decay < 0):
+        raise ValueError("--weight-decay must be finite and nonnegative")
     if args.model in POSE_MODEL_NAMES and resolved["fine_tune"]:
         raise ValueError("--fine-tune applies only to the image model")
     for name, default in ATTENTION_DEFAULTS.items():

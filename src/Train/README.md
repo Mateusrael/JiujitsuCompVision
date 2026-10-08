@@ -8,6 +8,13 @@ two DataLoader workers, seed 42, CUDA. An unavailable GPU is an error; choose
 and unweighted cross entropy. Start image fine tuning with a smaller learning
 rate if needed, by choosing it at the start of a new run.
 
+Set optimizer settings with `--lr` and `--weight-decay`. Weight decay accepts
+finite nonnegative values, including zero to disable it. AdamW applies it to all
+trainable parameters, including biases and normalization parameters. The selected
+value is recorded in the run configuration and optimizer checkpoint; changing it
+requires a new run, as with learning rate. Runs created before this CLI option
+used the same fixed default of 0.0001.
+
 Progress reporting uses `tqdm.auto`: an overall epoch bar and separate batch bars
 for training and validation. They show counts, percentage, throughput, elapsed
 time and ETA. Batch postfixes show sample-weighted running loss and accuracy;
@@ -75,7 +82,7 @@ The resolved configuration and provenance capture model, labels, exact annotatio
 and split hashes, Git state when available, environment, and device. Git is optional.
 
 `--resume <run>/checkpoints/last.pt` resumes that exact run. Omitted settings use
-the checkpoint values. Explicit changes to seed, batch size, learning rate,
+the checkpoint values. Explicit changes to seed, batch size, learning rate, weight decay,
 workers, pretrained/fine-tune/swap settings, or any attention architecture setting
 are rejected, as are changes to dropout or horizontal-mirror probability. Both
 effective attention dropout rates are saved and restored independently.

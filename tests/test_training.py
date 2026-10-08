@@ -100,6 +100,42 @@ class TrainingConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "seed"):
             resolve_settings(resume, settings)
 
+    def test_weight_decay_default_zero_and_custom_values(self):
+        parser = build_parser()
+        for model in ("pose", "pose-wide", "pose-attention", "image"):
+            with self.subTest(model=model):
+                default = resolve_settings(parser.parse_args(["--model", model]))
+                self.assertEqual(default["weight_decay"], 0.0001)
+                for value in (0.0, 0.001):
+                    settings = resolve_settings(parser.parse_args([
+                        "--model", model, "--weight-decay", str(value)]))
+                    self.assertEqual(settings["weight_decay"], value)
+
+    def test_weight_decay_rejects_negative_nonfinite_and_boolean_values(self):
+        parser = build_parser()
+        for value in ("-0.001", "nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "weight-decay"):
+                    resolve_settings(parser.parse_args([
+                        "--model", "pose", f"--weight-decay={value}"]))
+        invalid = parser.parse_args(["--model", "pose"])
+        invalid.weight_decay = True
+        with self.assertRaisesRegex(ValueError, "weight-decay"):
+            resolve_settings(invalid)
+
+    def test_weight_decay_is_restored_and_cannot_change_on_resume(self):
+        parser = build_parser()
+        previous = resolve_settings(parser.parse_args([
+            "--model", "pose", "--weight-decay", "0.001"]))
+        for flags in ([], ["--weight-decay", "0.001"]):
+            restored = resolve_settings(parser.parse_args(["--model", "pose"] + flags), previous)
+            self.assertEqual(restored["weight_decay"], 0.001)
+        for value in ("0", "0.01"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "Cannot change --weight-decay"):
+                    resolve_settings(parser.parse_args([
+                        "--model", "pose", "--weight-decay", value]), previous)
+
     def test_attention_settings_are_restored_and_cannot_change_on_resume(self):
         parser = build_parser()
         initial = parser.parse_args(["--model", "pose-attention", "--attention-dim", "48",
@@ -240,7 +276,8 @@ class TorchIntegrationTests(unittest.TestCase):
                     run = root / name
                     common = ["--model", name, "--annotations", str(annotations),
                               "--split", str(split), "--device", "cpu",
-                              "--dropout", "0.1", "--horizontal-flip-prob", "0.5", "--no-progress"]
+                              "--dropout", "0.1", "--horizontal-flip-prob", "0.5",
+                              "--weight-decay", "0.001", "--no-progress"]
                     if name == "image":
                         common += ["--images-dir", str(images_dir)]
                     if name == "pose-attention":
@@ -256,6 +293,12 @@ class TorchIntegrationTests(unittest.TestCase):
                     train(build_parser().parse_args(["--resume", str(last), "--epochs", "2"]))
                     second = load_checkpoint(last)
                     self.assertEqual(second["epoch"], 2)
+                    for checkpoint in (first, second):
+                        self.assertEqual(checkpoint["config"]["weight_decay"], 0.001)
+                        parameter_groups = checkpoint["optimizer_state"]["param_groups"]
+                        self.assertTrue(parameter_groups)
+                        self.assertTrue(all(group["weight_decay"] == 0.001
+                                            for group in parameter_groups))
                     self.assertEqual(second["config"]["workers"], 0)
                     self.assertEqual(second["config"]["dropout"], 0.1)
                     self.assertEqual(second["config"]["horizontal_flip_prob"], 0.5)

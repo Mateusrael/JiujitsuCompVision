@@ -393,10 +393,25 @@ gains depend on the model and workload. See the
 Compiler errors are surfaced; the project does not silently switch compilation off.
 
 CUDA is required by default; unavailable CUDA fails clearly. Data-loading workers,
-batch size, seed and learning rate can be set with CLI flags; see `--help`. Run
+batch size, seed, learning rate and weight decay can be set with CLI flags; see `--help`. Run
 directories are separate and must be new. Keep the seed and split fixed when
 comparing models. Missing poses are represented explicitly instead of excluding
 those samples from one side of the comparison.
+
+AdamW defaults to `--lr 0.001 --weight-decay 0.0001`. Weight decay must be finite
+and nonnegative; zero disables it. It applies to all trainable parameters,
+including biases and normalization parameters. Both optimizer settings are saved
+and must stay fixed when resuming. Start a new run to compare different settings.
+For example, an attention experiment with lower learning rate, higher weight decay,
+mirroring, attention dropout 0.1 and MLP dropout 0.15 is:
+
+```bash
+RUN_NAME=pose-attention-regularized bash launchers/START_TRAINING.sh --model pose-attention --epochs 30 --compile --lr 0.0003 --weight-decay 0.001 --horizontal-flip-prob 0.5 --attention-dropout 0.1 --attention-mlp-dropout 0.15
+```
+
+These are experiment settings, not established optimal values. Lower learning
+rates may need more epochs to converge. Changing several settings together tests
+the combination; separate runs are needed to isolate each setting's contribution.
 
 Resume from the last checkpoint and extend the total epoch count:
 
