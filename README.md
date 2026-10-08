@@ -459,11 +459,50 @@ Results include accuracy, macro-F1, per-class precision/recall/support and a
 confusion matrix. Supplied-pose model results assume pose annotations already exist;
 they do not measure an image-to-pose pipeline or end-to-end inference speed.
 
+## Export training metrics
+
+Collect every run under `TRAININGS_DIR` in one ZIP:
+
+```bash
+bash launchers/EXPORT_METRICS.sh
+```
+
+The command prints the archive path under `diagnostics/` (or `DIAGNOSTICS_DIR`
+if configured). Original run directory names are preserved in the archive.
+
+The archive includes:
+
+- Full per-epoch training/validation metrics, per-class scores and confusion matrices.
+- Start and resume configurations, including hyperparameters, split hashes and provenance.
+- Existing `diagnostics/test_metrics.json`, if evaluation was already run.
+- `summary.csv` with one row per run and best/final logged validation metrics.
+- `manifest.json` with file hashes and warnings about missing or incomplete records.
+
+This command reads result files only. It does not load checkpoints, start training
+or evaluation, use a GPU, or collect images, model weights, credentials or arbitrary
+files. Exports remain ignored by Git. Custom evaluation output paths are not
+collected; use the standard `diagnostics/test_metrics.json` for inclusion.
+
+Exports can be taken during training. They are snapshots of the bytes read from
+each file, not a simultaneous snapshot of all processes. An unfinished trailing
+metrics line is preserved in the ZIP but omitted from the summary with a warning.
+The last logged epoch does not prove that a checkpoint was saved or the process
+finished. Export again after the batch completes for a final comparison.
+Missing settings remain blank, including weight decay in runs logged before it
+became configurable. Original configurations are preserved alongside the metrics.
+
+The exporter uses only Python's standard library and also runs directly:
+
+```bash
+python3 src/Scripts/export_metrics.py --trainings-dir trainings --output diagnostics/metrics-export.zip
+```
+
+Choose a new output name for each snapshot; existing archives are never replaced.
+
 ## Git workflow and source bundles
 
-Keep code and shared configuration in Git. Dataset files, local settings,
-session handoff notes and generated results remain ignored and excluded from
-upload bundles.
+Keep code and shared configuration in Git. Dataset files, local settings and
+generated results remain ignored and excluded from upload bundles.
 
 If Git is installed in the Jupyter terminal, the repository host is reachable and
 you have repository access, clone through HTTPS into a new/empty folder under
@@ -471,7 +510,7 @@ you have repository access, clone through HTTPS into a new/empty folder under
 For updates, finish active runs, check local changes, then use `git pull --ff-only`.
 Do not embed access tokens in clone URLs, scripts or notebooks.
 
-For now, create an upload bundle on this development PC with:
+Create a source bundle with:
 
 ```powershell
 python -B src/Scripts/bundle_project.py
@@ -482,29 +521,10 @@ Use `--output dist/another-name.zip` for another snapshot. Each ZIP includes a
 commit. The supplied training provenance records Git when available; retain this
 bundle manifest alongside archived results when deploying by upload.
 
-## Validation status
+## Testing
 
-The user-reported DGX environment check confirmed PyTorch 2.11.0 + CUDA 12.8,
-torchvision 0.26.0, and GPU access. On 2026-10-07 the user reported passing GPU
-smoke tests for all four models: `pose`, `pose-wide`, `pose-attention`, and `image`.
-These checks used uncompiled execution. Compiled CUDA execution still needs its
-separate smoke check in the target environment.
-The full remote annotation audit found 120,279 records, all ten normalized
-classes, no malformed records, and no duplicate image IDs. That audit did not
-check image files; the full image download and image audit are not yet confirmed.
-No real-data training results have been reported.
-
-The default temporal split also passed validation against the complete official
-annotation content on 2026-10-07, with the same SHA-256 as the DGX audit and the
-counts reported above. The 208,848,730 annotation bytes were read into memory;
-the annotation file and image archive were not saved on this development PC.
-Only the derived report was saved to `diagnostics/temporal_split_validation.json`.
-The user also generated the shared DGX manifest successfully: 31,093 training,
-5,235 validation, 6,138 test and 77,813 excluded examples, with a minimum retained
-cross-partition separation of 151 frames.
-
-Local synthetic checks cover temporal exclusions, cross-class boundary gaps,
-shared assignments and manifest validation:
+Run the synthetic tests for annotations, temporal exclusions, cross-class
+boundary gaps, shared assignments, manifest validation and result exports:
 
 ```bash
 python -B -m unittest discover -s tests -v
@@ -517,18 +537,12 @@ data only, without pretrained downloads:
 JIUJITSU_RUN_TORCH_TESTS=1 python -B -m unittest discover -s tests -v
 ```
 
-These require an environment with PyTorch, torchvision and tqdm; other checks use
-Python's standard library. On 2026-10-07, all 91 tests passed locally with no
-skips on CPU using PyTorch 2.8 and torchvision 0.23. They covered training,
-resume and evaluation for all four models with horizontal-mirror probability
-0.5 and dropout 0.1 (attention weight/output dropout 0.1 and block MLP dropout
-0.2), plus checkpoint reconstruction with nondefault attention settings.
-Separate checks covered independent dropout branches, explicit-zero overrides,
-and dropout being disabled during evaluation. Resumed CPU weights matched
-uninterrupted training exactly for every model, including the frozen ResNet
-classifier. The separate CPU
-forward/backward smoke check also passed for all four models.
-Progress-on/off checks preserve weights, metrics and RNG state exactly.
+The integration tests require PyTorch, torchvision and tqdm; other checks use
+Python's standard library. They cover training, resume and evaluation for all
+four models, augmentation, configurable weight decay, independent dropout
+branches and checkpoint reconstruction with nondefault attention settings.
+They verify that resumed CPU weights match uninterrupted training and that
+progress reporting preserves weights, metrics and RNG state.
 Whole-model compilation checks exercise real TorchDynamo graph capture with
 the CPU `eager` backend for all four models, plus checkpoint portability and
 runtime-option overrides. These do not validate native CUDA/Inductor compilation

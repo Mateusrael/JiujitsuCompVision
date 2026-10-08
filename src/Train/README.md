@@ -81,6 +81,12 @@ Every fresh run requires a new `--run-dir`. Outputs are `config_start.json`,
 The resolved configuration and provenance capture model, labels, exact annotation
 and split hashes, Git state when available, environment, and device. Git is optional.
 
+Use `bash launchers/EXPORT_METRICS.sh` to collect metrics and configurations from
+all runs into one ZIP. It preserves run names and raw metric logs,
+adds a comparison CSV and a manifest, and does not read checkpoints or evaluate
+models. See the root README for the archive contents and the limits of snapshots
+taken during active training.
+
 `--resume <run>/checkpoints/last.pt` resumes that exact run. Omitted settings use
 the checkpoint values. Explicit changes to seed, batch size, learning rate, weight decay,
 workers, pretrained/fine-tune/swap settings, or any attention architecture setting
