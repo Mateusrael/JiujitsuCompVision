@@ -197,6 +197,16 @@ outside buffers, so they do not replace the temporal gap required for images.
 The buffer audit distinguishes annotated images already missing an athlete
 from buffered images with both poses.
 
+Optional group `boundary_adjustments` move an internal section boundary after
+the base allocation while preserving every section's train/validation/test role.
+The neighboring section endpoint moves with it, and memberships and temporal
+buffers are rebuilt. The current plan shifts half-guard validation section
+`03-05-013` 50 reference frames earlier, from `[3825, 4087)` to `[3775, 4037)`.
+Its retained interior becomes `3850 < frame < 3962`; the ambiguous ending falls
+inside the ordinary buffer. Sample counts can change because annotations and
+complete poses are unevenly distributed. Final balance, coverage and separation
+checks still apply; the manifest records the effective sections and adjustment audit.
+
 Whole sections make the ratios approximate. The plan's `max_class_deviation`
 sets the maximum absolute difference between each class's retained train/val/test
 shares and the requested targets, separately for image and pose populations.

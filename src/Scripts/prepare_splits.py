@@ -135,6 +135,9 @@ def main():
               f"{buffers['already_ineligible_missing_athlete']:,} already ineligible for pose models "
               "because an athlete is missing; "
               f"{buffers['otherwise_eligible_pose_samples']:,} with both poses also removed.")
+    for change in manifest.get("boundary_adjustment_audit", []):
+        print(f"Adjusted boundary {change['group']} before {change['before_section']}: "
+              f"{change['old_boundary']} -> {change['new_boundary']} reference frames")
 
 
 if __name__ == "__main__":

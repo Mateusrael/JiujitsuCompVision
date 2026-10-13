@@ -319,6 +319,18 @@
           "start": 6617,
           "end": 7001
         }
+      ],
+      "boundary_adjustments": [
+        {
+          "before_section": "03-05-013",
+          "new_boundary": 3775,
+          "reason": "Move the half-guard validation section 50 reference frames earlier, preserving its duration while replacing the ambiguous ending with earlier frames."
+        },
+        {
+          "before_section": "03-05-014",
+          "new_boundary": 4037,
+          "reason": "Move the right edge of the half-guard validation section with its left edge. With the 75-frame right buffer, source 03 frame 3962 and the reviewed tail fall in buffer across all aligned cameras. The cutoff is chosen after visual review; camera alignment is estimated."
+        }
       ]
     },
     {

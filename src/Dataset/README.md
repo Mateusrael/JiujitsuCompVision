@@ -63,6 +63,19 @@ by themselves establish an annotation gap or a synchronization landmark.
 an athlete, and how many contain both poses. These counts distinguish existing
 pose ineligibility from additional complete-pose examples removed by buffers.
 
+A group's optional `boundary_adjustments` list contains `before_section`,
+`new_boundary`, and a nonempty `reason`. Each entry moves the named section's
+start and the preceding section's end in shared reference-frame coordinates.
+The base candidates are allocated first; these adjustments preserve section
+roles while rebuilding membership, buffers, counts and all final split audits.
+Boundaries must be internal, finite, unique and leave every section nonempty.
+The stored `section_plan` contains base candidates and adjustments; `sections`
+contains effective boundaries, and `boundary_adjustment_audit` records each
+old/new cut. The allocation objective explicitly describes the base allocation.
+The default plan shifts validation section `03-05-013` 50 reference frames
+earlier after visual review of the half-guard ending. This adds earlier frames
+to validation and puts the ambiguous tail inside its ordinary right buffer.
+
 `PREPARE_SPLITS.sh` creates `Data/splits/multiview_sections.json`. Its schema-3
 manifest records the full plan, image and pose assignments, evaluation types,
 exclusion reasons, pooled/per-type class counts for both populations, taxonomy,

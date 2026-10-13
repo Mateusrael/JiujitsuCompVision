@@ -85,6 +85,39 @@ def _validate_plan(plan, records, digest):
         raise ValueError("Section sources must cover every observed prefix exactly")
 
 
+def _adjusted_section_plan(plan):
+    """Move explicit internal cuts after allocation, preserving section identities."""
+    effective, audit = deepcopy(plan), []
+    for original, group in zip(plan["groups"], effective["groups"]):
+        adjustments = original.get("boundary_adjustments", [])
+        if not isinstance(adjustments, list):
+            raise ValueError("boundary_adjustments must be a list")
+        indices = {section["id"]: i for i, section in enumerate(original["sections"])}
+        seen = set()
+        for change in adjustments:
+            if (not isinstance(change, dict)
+                    or set(change) != {"before_section", "new_boundary", "reason"}
+                    or not isinstance(change["before_section"], str)
+                    or change["before_section"] not in indices
+                    or indices[change["before_section"]] == 0
+                    or not _number(change["new_boundary"])
+                    or not isinstance(change["reason"], str) or not change["reason"].strip()):
+                raise ValueError("boundary_adjustments require an internal section ID, finite boundary and reason")
+            section_id = change["before_section"]
+            if section_id in seen:
+                raise ValueError("boundary_adjustments cannot move the same boundary twice")
+            seen.add(section_id)
+            i = indices[section_id]
+            group["sections"][i - 1]["end"] = change["new_boundary"]
+            group["sections"][i]["start"] = change["new_boundary"]
+            audit.append({"group": group["id"], "before_section": section_id,
+                          "old_boundary": original["sections"][i]["start"],
+                          "new_boundary": change["new_boundary"], "reason": change["reason"]})
+        if any(section["start"] >= section["end"] for section in group["sections"]):
+            raise ValueError("boundary_adjustments must preserve ordered nonempty sections")
+    return effective, audit
+
+
 def _prepare(records, plan):
     """Index records once; preserve local and estimated common-clock coordinates."""
     class_index = {name: i for i, name in enumerate(CLASS_NAMES_10)}
@@ -461,6 +494,42 @@ def _balance_report(report, plan):
     }
 
 
+def _adjusted_distribution(blocks, records, assignments, pose_assignments):
+    """Recount base-supported chronological thirds using adjusted membership."""
+    spread, slots = _spread_spec(blocks)
+    counts = [0] * len(slots)
+    for index, (image_slot, pose_slot) in spread.items():
+        image = records[index]["image"]
+        if assignments[image] in ("val", "test"):
+            counts[image_slot] += 1
+        if pose_slot is not None and pose_assignments[image] in ("val", "test"):
+            counts[pose_slot] += 1
+    return [{**slot, "evaluation_samples": count} for slot, count in zip(slots, counts)]
+
+
+def _audit_adjusted_coverage(report, plan):
+    """Moving a boundary must still satisfy all allocation coverage requirements."""
+    minimum = plan["min_samples_per_class"]
+    for population, prefix in (("image", ""), ("pose", "pose_")):
+        train = report[prefix + "class_counts"]["train"]
+        evaluated = report[prefix + "evaluation_class_counts"]
+        counts = [*train.values(), *(count for part in evaluated.values()
+                                    for kind in part.values() for count in kind.values())]
+        if min(counts) < minimum:
+            raise ValueError(f"Adjusted boundaries leave insufficient {population} class coverage")
+        balance = report["balance_audit"]["populations"][population]
+        if any(abs(balance["overall_fractions"][part] - target) > .025
+               for part, target in zip(("train", "val", "test"), plan["target_fractions"])):
+            raise ValueError(f"Adjusted boundaries put {population} too far from target fractions")
+        if balance["maximum_class_deviation_percentage_points"] > 100 * plan.get(
+                "max_class_deviation", DEFAULT_MAX_CLASS_DEVIATION):
+            raise ValueError(f"Adjusted boundaries exceed {population} max_class_deviation")
+    distribution = report["distribution_audit"]
+    if any(row["evaluation_samples"] < distribution["minimum_per_third"]
+           for key in ("coverage", "pose_coverage") for row in distribution[key]):
+        raise ValueError("Adjusted boundaries leave insufficient evaluation coverage in supported class thirds")
+
+
 def _audit_separation(records, plan, assignments, pose_assignments, evaluation_types):
     """Check final memberships independently of candidate-option bookkeeping."""
     clocks = {source: (group["id"], group["alignment"][source])
@@ -559,8 +628,15 @@ def build_multiview_manifest(records, annotation_sha256, *, section_plan=None):
     records = sorted(records, key=lambda row: row["image"])
     plan = deepcopy(section_plan) if section_plan is not None else json.loads(DEFAULT_PLAN.read_text(encoding="utf-8"))
     _validate_plan(plan, records, annotation_sha256)
-    blocks = _prepare(records, plan)
+    effective_plan, boundary_audit = _adjusted_section_plan(plan)
+    blocks = base_blocks = _prepare(records, plan)
     choices, expected, objective, distribution = _allocate(blocks, plan)
+    if boundary_audit:
+        # Preserve the base allocation's section roles. Only the reviewed cuts move.
+        blocks = _prepare(records, effective_plan)
+        expected = sum((_option(block, action, _trim(blocks, choices, i), plan)
+                        for i, (block, action) in enumerate(zip(blocks, choices))),
+                       np.zeros_like(expected))
     assignments, pose_assignments, types, reasons, pose_reasons, section_ids = {}, {}, {}, {}, {}, {}
     sections = []
     actual = np.zeros_like(expected)
@@ -599,6 +675,12 @@ def build_multiview_manifest(records, annotation_sha256, *, section_plan=None):
               "evaluation_types": dict(sorted(types.items())), "section_ids": dict(sorted(section_ids.items())),
               "exclusion_reasons": dict(sorted(reasons.items())), "pose_exclusion_reasons": dict(sorted(pose_reasons.items())),
               "sections": sections, "pose_filter": "both_present"}
+    if boundary_audit:
+        report["boundary_adjustment_audit"] = boundary_audit
+        report["allocation"]["objective_scope"] = "Base candidate allocation before boundary adjustments."
+        report["allocation"]["boundary_adjustment_policy"] = (
+            "Preserve section roles; recompute membership and temporal buffers at the adjusted boundaries.")
+        distribution = _adjusted_distribution(base_blocks, records, assignments, pose_assignments)
     distribution_by_population = {
         population: [{key: value for key, value in row.items() if key != "population"}
                      for row in distribution if row["population"] == population]
@@ -608,9 +690,14 @@ def build_multiview_manifest(records, annotation_sha256, *, section_plan=None):
                                     "minimum_per_third": 20,
                                     "coverage": distribution_by_population["image"],
                                     "pose_coverage": distribution_by_population["pose"]}
+    if boundary_audit:
+        report["distribution_audit"]["support_scope"] = (
+            "Base candidate sections define supported thirds; counts use adjusted membership.")
     report.update(_population_report(assignments, types, records))
     report.update({"pose_" + key: value for key, value in _population_report(pose_assignments, types, records).items()})
     report["balance_audit"] = _balance_report(report, plan)
+    if boundary_audit:
+        _audit_adjusted_coverage(report, plan)
     buffered = [row for row in records if reasons.get(row["image"]) == "temporal_buffer"]
     complete_in_buffer = sum(both_poses_present(row) for row in buffered)
     report["pose_buffer_audit"] = {
