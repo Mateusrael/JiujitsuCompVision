@@ -1,6 +1,6 @@
 # Modules
 
-All four models return unnormalized logits with shape `(B, 10)` for the shared
+All five models return unnormalized logits with shape `(B, 10)` for the shared
 class order. Cross entropy consumes these logits directly; the models do not
 apply a final softmax. Each input describes one frame.
 
@@ -72,14 +72,14 @@ They support the same training augmentations: athlete swapping with probability
 0.5 by default, and optional horizontal mirroring with probability zero by
 default. Changing architecture does not filter the dataset or require images.
 
-## Image classifier
+## ResNet-18 image classifier
 
-`models.ImageClassifier(num_classes=10, pretrained=True, fine_tune=False, dropout=0.0)` uses
+`models.ImageClassifier(num_classes=10, pretrained=True, image_training="head", dropout=0.0)` uses
 torchvision ResNet-18 and a replacement linear classifier, selected by
 `--model image`. Fresh image runs default to
 `ResNet18_Weights.DEFAULT`; a first run may download these weights. The backbone
-is frozen by default, including BatchNorm running statistics. `--fine-tune`
-enables all backbone parameters. Input is `(B, 3, 224, 224)`.
+is frozen by default, including BatchNorm running statistics. `--image-training`
+selects `head`, `layer4`, or `full`. Input is `(B, 3, 224, 224)`.
 
 For a 224 × 224 image, the backbone has a 7 × 7 stride-2 convolution, BatchNorm,
 ReLU and a 3 × 3 stride-2 max pool, then four stages with channel widths
@@ -92,12 +92,57 @@ The original ImageNet `512 → 1000` classification layer is replaced with an
 identity operation inside `backbone`; `classifier = Linear(512, 10)` takes its
 place in the full model. It is not stacked after the original 1,000 predictions.
 The new classifier is initialized randomly. Default training updates only its
-weights and bias; `--fine-tune` also updates all backbone parameters.
+weights and bias. Mode `layer4` also trains both residual blocks in the last
+stage, leaving the initial convolution and stages 1–3 frozen. Mode `full` trains
+all backbone parameters. Freezing a stage disables its gradients and keeps its
+BatchNorm running statistics unchanged through every `train()`/`eval()` cycle.
+BatchNorm in the trainable stages continues updating during training.
+For ten classes, `head` trains 5,130 parameters and `layer4` trains 8,398,858
+out of 11,181,642 total (75.11%). The last stage contains most of ResNet-18's
+parameters, so freezing the earlier stages still leaves substantial capacity.
+
+The legacy `fine_tune` argument still maps `False` to `head` and `True` to `full`
+when no explicit mode is supplied. An explicit mode must agree with a supplied
+boolean about whether any backbone parameters are trainable.
 
 Optional dropout acts on the 512 pooled features before this classifier. It is
 disabled by default and active during training even if the backbone is frozen.
 It does not change the backbone's frozen BatchNorm behavior. Every model disables
 dropout during validation and test evaluation.
+
+## DINOv3 image classifier
+
+`dinov3.FrozenDINOv3Classifier(num_classes=10, pretrained=True, dropout=0.0)` is
+selected by `--model image-dinov3`. It uses Transformers 4.57.1's
+`DINOv3ViTModel` with the official
+[`facebook/dinov3-vitb16-pretrain-lvd1689m` checkpoint](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m).
+The implementation is installed as a package; model loading does not fetch or
+execute remote Python code. The Transformers import is lazy, so importing the
+other model implementations does not require it.
+
+ViT-B/16 uses 16 × 16 image patches, 12 transformer blocks with 12 heads,
+768-dimensional embeddings, 3072-dimensional block MLPs, and four register tokens.
+The final normalized CLS token is the image representation (`pooler_output`).
+It passes through optional dropout and `Linear(768, 10)`: **7,690 trainable
+parameters** with roughly 86 million frozen backbone parameters.
+
+The backbone has no trainable scope option: every parameter has gradients
+disabled, and `train()` always keeps it in evaluation mode, including its
+positional augmentation. Feature extraction runs under `no_grad()` while the
+classifier receives gradients normally. Dropout applies only before the head,
+defaults to zero, and is disabled for validation/test.
+
+Input is the same `(B, 3, 224, 224)` letterboxed, ImageNet-normalized full frame
+used by ResNet-18. Letterboxing is an intentional project choice to preserve
+both athletes; it is not the official processor's direct resize. Features are
+computed each batch; there is no feature cache.
+
+Fresh pretrained loading requires access to the gated model and a Hugging Face
+login in the training environment. Bootstrap does not download weights.
+`dinov3_config.py` records the exact backend version, weights ID and explicit
+backbone configuration without importing Torch. `pretrained=False` constructs
+that architecture locally for complete checkpoint reconstruction or synthetic
+smoke tests. Frozen random features are not a useful pretrained baseline.
 
 ## Checkpoint contract
 
@@ -110,6 +155,13 @@ pooling, learned slot order, masking, activation, normalization and preprocessin
 Resume preserves these choices and evaluation rebuilds the saved architecture.
 MLP and image model contracts record their single `dropout` rate. All contracts
 must match the complete configuration produced by `architecture_config`.
+New image runs also record `image_training`; legacy head/full definitions with
+only `fine_tune` are still loadable. Resume restores the selected mode and rejects
+scope changes so that optimizer state always matches the trainable parameters.
+DINOv3 contracts additionally record its pretrained model identity, backend
+version, complete backbone configuration, frozen scope and CLS pooling. The
+checkpoint contains the backbone and classifier state, so resume/evaluation
+requires the installed backend but no model download or Hub authentication.
 
 ## Optional compiled execution
 
@@ -126,3 +178,6 @@ using the returned wrapper for forward execution. Loading restores raw weights
 before optionally compiling. Compilation is separate from `architecture_config`
 and can be switched on/off without changing model state keys. Initial calls can
 compile lazily; the helper reports this and preserves compiler error details.
+DINOv3 uses the same whole-model wrapper. Native CUDA/Inductor execution and
+performance must be verified on the target DGX; validation of the earlier four
+models does not establish DINOv3 compatibility or a speedup.

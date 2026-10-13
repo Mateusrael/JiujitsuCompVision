@@ -5,6 +5,11 @@ from numbers import Real
 
 import torch.nn as nn
 
+from src.Modules.dinov3_config import (
+    DINOV3_BACKBONE_CONFIG, DINOV3_TRANSFORMERS_VERSION, DINOV3_WEIGHTS_ID,
+)
+from src.Modules.image_training import resolve_image_training
+from src.Modules.registry import IMAGE_MODEL_NAMES
 from src.Modules.pose_attention import (
     PoseAttentionClassifier, resolve_dropout_rates, validate_attention_parameters,
 )
@@ -51,44 +56,69 @@ class PoseWideMLP(nn.Module):
 
 
 class ImageClassifier(nn.Module):
-    def __init__(self, num_classes=10, *, pretrained=True, fine_tune=False,
-                 dropout=0.0):
+    def __init__(self, num_classes=10, *, pretrained=True, fine_tune=None,
+                 dropout=0.0, image_training=None):
         super().__init__()
         _validate_dropout(dropout)
+        self.image_training = resolve_image_training(image_training, fine_tune)
         from torchvision.models import ResNet18_Weights, resnet18
         self.backbone = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
         self.backbone.fc = nn.Identity()
         self.dropout = nn.Dropout(float(dropout))
         self.classifier = nn.Linear(512, num_classes)
-        self.fine_tune = fine_tune
-        if not fine_tune:
-            self.backbone.requires_grad_(False)
+        self.fine_tune = self.image_training != "head"
+        self.backbone.requires_grad_(self.image_training == "full")
+        if self.image_training == "layer4":
+            self.backbone.layer4.requires_grad_(True)
+        self.train(self.training)
 
     def train(self, mode=True):
         super().train(mode)
-        if not self.fine_tune:
-            # Freezing weights also keeps pretrained BatchNorm statistics fixed.
+        if self.image_training != "full":
+            # Frozen stages retain their pretrained BatchNorm running statistics.
             self.backbone.eval()
+            if self.image_training == "layer4":
+                self.backbone.layer4.train(mode)
         return self
 
     def forward(self, images):
         return self.classifier(self.dropout(self.backbone(images)))
 
 
-def architecture_config(model, num_classes=10, *, fine_tune=False, dropout=0.0,
+def architecture_config(model, num_classes=10, *, fine_tune=None, dropout=0.0,
+                        image_training=None,
                         attention_dim=128, attention_heads=4, attention_layers=4,
                         attention_mlp_dim=512, attention_dropout=None,
                         attention_mlp_dropout=None, attention_pooling="mean"):
     _validate_dropout(dropout)
+    if model not in IMAGE_MODEL_NAMES and image_training is not None:
+        raise ValueError("image_training applies only to image models")
     if model == "pose":
         return {"type": "pose_mlp", "input_features": 102, "hidden": [102, 34],
                 "num_classes": num_classes, "pose_preprocessing": "pair_bbox_v1",
                 "dropout": float(dropout)}
     if model == "image":
-        return {"type": "resnet18", "num_classes": num_classes,
-                "fine_tune": fine_tune, "image_size": 224,
+        mode = resolve_image_training(image_training, fine_tune)
+        config = {"type": "resnet18", "num_classes": num_classes,
+                "fine_tune": mode != "head", "image_size": 224,
                 "image_preprocessing": "letterbox_imagenet_v1",
                 "dropout": float(dropout)}
+        # Keep legacy head/full model definitions loadable without rewriting them.
+        if image_training is not None:
+            config["image_training"] = mode
+        return config
+    if model == "image-dinov3":
+        if resolve_image_training(image_training, fine_tune) != "head":
+            raise ValueError("image-dinov3 supports only frozen-backbone head training")
+        if (isinstance(num_classes, bool) or not isinstance(num_classes, int)
+                or num_classes <= 0):
+            raise ValueError("num_classes must be a positive integer")
+        return {"type": "dinov3_vitb16", "num_classes": num_classes,
+                "backend": "transformers", "backend_version": DINOV3_TRANSFORMERS_VERSION,
+                "weights_id": DINOV3_WEIGHTS_ID,
+                "backbone_config": dict(DINOV3_BACKBONE_CONFIG), "pooling": "cls",
+                "fine_tune": False, "image_training": "head", "image_size": 224,
+                "image_preprocessing": "letterbox_imagenet_v1", "dropout": float(dropout)}
     if model == "pose-wide":
         if (isinstance(num_classes, bool) or not isinstance(num_classes, int)
                 or num_classes <= 0):
@@ -162,13 +192,24 @@ def build_model(config, *, pretrained=False):
     elif model_type == "resnet18":
         expected = architecture_config("image", config["num_classes"],
                                        fine_tune=config.get("fine_tune", False),
+                                       image_training=config.get("image_training"),
                                        dropout=config.get("dropout"))
         # Checkpoints supply all weights; loading never downloads them again.
         if config != expected:
             raise ValueError(f"Unsupported model configuration: {config!r}")
         model = ImageClassifier(config["num_classes"], pretrained=pretrained,
                                 fine_tune=config["fine_tune"],
+                                image_training=config.get("image_training"),
                                 dropout=config["dropout"])
+    elif model_type == "dinov3_vitb16":
+        expected = architecture_config(
+            "image-dinov3", config["num_classes"], fine_tune=config.get("fine_tune"),
+            image_training=config.get("image_training"), dropout=config.get("dropout"))
+        if config != expected:
+            raise ValueError(f"Unsupported model configuration: {config!r}")
+        from src.Modules.dinov3 import FrozenDINOv3Classifier
+        model = FrozenDINOv3Classifier(config["num_classes"], pretrained=pretrained,
+                                       dropout=config["dropout"])
     else:
         raise ValueError(f"Unsupported model configuration: {config!r}")
     if config != expected:

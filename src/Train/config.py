@@ -3,8 +3,9 @@
 import math
 from pathlib import Path
 
-from src.Modules.registry import POSE_MODEL_NAMES
+from src.Modules.registry import IMAGE_MODEL_NAMES, POSE_MODEL_NAMES
 from src.Modules.execution import validate_compile_settings
+from src.Modules.image_training import resolve_image_training
 
 
 DEFAULTS = {"epochs": 20, "batch_size": 128, "lr": 0.001, "weight_decay": 0.0001,
@@ -47,7 +48,23 @@ def resolve_settings(args, previous=None):
             or not math.isfinite(weight_decay) or weight_decay < 0):
         raise ValueError("--weight-decay must be finite and nonnegative")
     if args.model in POSE_MODEL_NAMES and resolved["fine_tune"]:
-        raise ValueError("--fine-tune applies only to the image model")
+        raise ValueError("--fine-tune applies only to the image (ResNet) model")
+    requested_mode = getattr(args, "image_training", None)
+    if args.model not in IMAGE_MODEL_NAMES and requested_mode is not None:
+        raise ValueError("--image-training applies only to image models")
+    if args.model in IMAGE_MODEL_NAMES:
+        saved_mode = resolve_image_training((previous or {}).get("image_training"),
+                                           (previous or {}).get("fine_tune"))
+        requested_fine_tune = getattr(args, "fine_tune", None)
+        mode = (saved_mode if previous is not None and requested_mode is None
+                and requested_fine_tune is None else
+                resolve_image_training(requested_mode, requested_fine_tune))
+        if previous is not None and mode != saved_mode:
+            raise ValueError("Cannot change --image-training when resuming")
+        if args.model == "image-dinov3" and mode != "head":
+            raise ValueError("image-dinov3 supports only frozen-backbone head training")
+        resolved["image_training"] = mode
+        resolved["fine_tune"] = mode != "head"
     for name, default in ATTENTION_DEFAULTS.items():
         supplied = getattr(args, name, None)
         if args.model != "pose-attention":

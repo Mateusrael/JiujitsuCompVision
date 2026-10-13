@@ -1,6 +1,7 @@
 """Readable run configuration and runtime provenance."""
 
 import json
+from importlib.metadata import PackageNotFoundError, version
 import platform
 import subprocess
 import sys
@@ -28,8 +29,13 @@ def provenance(torch, device):
             text=True, check=True, timeout=5).stdout.strip())
     except (OSError, subprocess.SubprocessError):
         pass
+    try:
+        transformers_version = version("transformers")
+    except PackageNotFoundError:
+        transformers_version = None
     return {"timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "python": sys.version, "torch": torch.__version__,
+            "transformers": transformers_version,
             "platform": platform.platform(), "git": git,
             "device": str(device), "cuda_runtime": torch.version.cuda,
             "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None}

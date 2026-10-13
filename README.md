@@ -1,6 +1,7 @@
 # Jiu-jitsu position classification
 
-Compare three classifiers using supplied athlete poses with an image classifier.
+Compare three classifiers using supplied athlete poses with ResNet-18 and
+DINOv3 ViT-B/16 image classifiers.
 The target environment is Linux with Python 3.11, PyTorch 2.11.0,
 torchvision 0.26.0 and CUDA 12.8. Setup creates an isolated project virtual
 environment. Training uses one GPU per process.
@@ -14,7 +15,7 @@ launchers/      editable paths and commands to run common operations
 src/
   Dataset/      annotation validation, audit, download, shared evaluation splits
   Loader/       paired-pose features and image loading
-  Modules/      two pose MLPs, joint self-attention and ResNet-18
+  Modules/      two pose MLPs, joint self-attention, ResNet-18 and DINOv3
   Train/        training, checkpointing, experiment metadata
   Eval/         classification metrics and evaluation
   Scripts/      command-line entry points and upload bundle creation
@@ -69,7 +70,7 @@ bash launchers/CHECK_ENVIRONMENT.sh --require-torch --require-cuda
 
 The default setup creates `.venv` without system-site packages and installs
 `torch==2.11.0` and `torchvision==0.26.0` from the official CUDA 12.8 wheel index,
-plus the pinned `tqdm` progress dependency from PyPI.
+plus runtime dependencies from PyPI, including `tqdm` and `transformers==4.57.1`.
 It checks package versions, their imports and the PyTorch CUDA runtime build.
 No system packages, NVIDIA drivers or system CUDA toolkit are installed.
 The corresponding explicit installer command is:
@@ -78,7 +79,7 @@ The corresponding explicit installer command is:
 bash install/install.sh --torch cu128
 ```
 
-After updating an existing DGX checkout, install the progress dependency without
+After updating an existing DGX checkout, update runtime dependencies without
 reinstalling PyTorch:
 
 ```bash
@@ -113,7 +114,7 @@ credentials in it. Launchers automatically select the project `.venv` unless
 
 ## Obtain and inspect data remotely
 
-Start with annotations, which serve all four models:
+Start with annotations, which serve all five models:
 
 ```bash
 bash launchers/DOWNLOAD_DATA.sh
@@ -157,7 +158,7 @@ The default **multiview section split** targets **80% training, 10% validation,
 and 10% test** among retained annotated images. It uses all 16 sources, grouped
 as `00–02`, `03–05`, `06–08`, `09–10`, `11–13`, and `14–15`. Contiguous evaluation
 sections are distributed throughout the recordings instead of always holding
-out the latest examples of each class. All four models share the section
+out the latest examples of each class. All five models share the section
 boundaries and train/validation/test roles; pose models additionally require
 both athletes' supplied poses in every partition. Image training retains
 single-pose images. The split balances both eligible populations toward the
@@ -192,7 +193,7 @@ touching an evaluation section, for a total width of 150 frames across views.
 Held-out-view samples require another training camera with the same normalized
 class within three reference frames; samples without a counterpart are excluded.
 Missing-pose frames can occupy the temporal buffers, reducing how many usable
-pose examples a boundary removes. Those frames remain usable by the image model
+pose examples a boundary removes. Those frames remain usable by the image models
 outside buffers, so they do not replace the temporal gap required for images.
 The buffer audit distinguishes annotated images already missing an athlete
 from buffered images with both poses.
@@ -298,11 +299,11 @@ Run a synthetic forward/backward smoke check inside the approved allocation:
 ```
 
 For a small CPU check when a GPU is not allocated, use `--device cpu` explicitly.
-The default smoke check exercises all four models using synthetic inputs and
+The default smoke check exercises all five models using synthetic inputs and
 untrained image weights. Select one model with `--model pose`, `pose-wide`,
-`pose-attention`, or `image`; `--model both` retains the original pose/image check.
-Full image training uses pretrained ResNet-18 weights, requiring a download/cache
-on first use.
+`pose-attention`, `image`, or `image-dinov3`; `--model both` retains the original
+pose/ResNet check. Fresh image training uses pretrained backbone weights,
+requiring a download/cache on first use. DINOv3 access setup is described below.
 
 To check optional whole-model compilation on the DGX as well:
 
@@ -327,9 +328,10 @@ these models extracts poses from images or models changes across video frames.
 | `pose` | `102 → 102 → 34 → 10`, ReLU after both hidden layers | All parameters, initialized randomly |
 | `pose-wide` | `102 → 512 → 128 → 32 → 10`, ReLU after all three hidden layers | All parameters, initialized randomly |
 | `pose-attention` | 34 joint tokens, four attention/MLP blocks, pooled features → 10 | All parameters, initialized randomly |
-| `image` | ImageNet-pretrained ResNet-18 with a replacement `512 → 10` classifier | New classifier only; `--fine-tune` also updates the backbone |
+| `image` | ImageNet-pretrained ResNet-18 with a replacement `512 → 10` classifier | `--image-training head` (default), `layer4` plus classifier, or `full` |
+| `image-dinov3` | DINOv3-pretrained ViT-B/16 CLS features → `768 → 10` classifier | Frozen backbone; only the 7,690-parameter classifier trains |
 
-Horizontal mirroring and dropout are optional for all four models and are
+Horizontal mirroring and dropout are optional for all five models and are
 **disabled by default**:
 
 | Option | Default | Meaning |
@@ -344,9 +346,10 @@ The mirror keeps athlete slots in place and is independent of the existing
 athlete-swap augmentation. No vertical flip is applied. Validation and test
 examples are never randomly mirrored or athlete-swapped.
 
-For the MLPs, dropout follows each hidden ReLU. For the image model, it acts on
-the 512 pooled features before the classifier, including when the backbone is
-frozen. For attention, it acts inside the attention/MLP blocks as described below.
+For the MLPs, dropout follows each hidden ReLU. For the image models, it acts on
+the features before the classifier: 512 pooled features for ResNet-18 and 768
+CLS features for DINOv3. For pose attention, it acts inside the attention/MLP
+blocks as described below.
 Dropout is disabled during validation and test evaluation; logits are never
 passed through a dropout layer.
 
@@ -382,13 +385,67 @@ and keeps the block MLP dropout at 0.2. Without any dropout flags, both are zero
 and classifies its final representation instead of averaging the joints. All
 architecture choices are saved in the checkpoint and cannot change on resume.
 
-The image model preserves both athletes using resize-and-pad to 224 × 224 and
-ImageNet normalization. Its original ImageNet `512 → 1000` layer is removed;
-the new `512 → 10` classifier takes its place. The frozen backbone, including
-BatchNorm statistics, produces the 512 features. Use `--fine-tune` for a separate
-image experiment that updates the entire network, or `--no-pretrained` for an
-explicitly untrained image baseline or smoke check. See
+Both image models preserve both athletes using resize-and-pad to 224 × 224 and
+ImageNet normalization. ResNet-18's original ImageNet `512 → 1000` layer is removed;
+the new `512 → 10` classifier takes its place. Choose the trainable scope with
+`--image-training`:
+
+- `head` (default): freeze the entire backbone, including BatchNorm statistics.
+- `layer4`: train the last residual stage (both blocks) and the classifier.
+  The initial convolution and stages `layer1`–`layer3` stay frozen, including
+  their BatchNorm statistics. BatchNorm in `layer4` updates during training.
+- `full`: train the whole backbone and classifier.
+
+For partial fine-tuning in a fresh run:
+
+```bash
+bash launchers/START_TRAINING.sh --model image --pretrained \
+    --image-training layer4 --epochs 6 --lr 3e-5 \
+    --weight-decay 0.001 --dropout 0.15
+```
+
+The selected scope and trainable/frozen parameter counts are saved with the run;
+the counts are also printed at startup. `--lr` applies to all selected parameters.
+Start a new run to change scope. Existing `--fine-tune` and `--no-fine-tune`
+remain aliases for `full` and `head`; do not combine them with `--image-training`.
+Use `--no-pretrained` for an explicitly untrained image baseline or smoke check. See
 [the module documentation](src/Modules/README.md) for the architecture contracts.
+
+### DINOv3 frozen image features
+
+`--model image-dinov3` uses the official
+[`facebook/dinov3-vitb16-pretrain-lvd1689m` weights](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m)
+through Transformers 4.57.1. The ViT-B/16 backbone has 12 blocks, 12 attention
+heads, four register tokens, and 768-dimensional features. Its normalized CLS
+token feeds optional dropout and a new `768 → 10` linear classifier. Only the
+classifier's **7,690 parameters** train; the approximately 86-million-parameter
+backbone stays frozen and in evaluation mode. This mode does not support
+`--image-training layer4`, `full`, or `--fine-tune`.
+
+The official weights require access approval. Review the conditions on the model
+page using your Hugging Face account, then authenticate interactively on the DGX:
+
+```bash
+.venv/bin/hf auth login
+```
+
+Enter the token at the interactive prompt, not in command arguments or project
+files; Git credential storage is not needed. The first pretrained run downloads
+and caches the weights. Bootstrap installs dependencies but does not download
+these weights. Fresh DINOv3 runs default to pretrained weights; `--no-pretrained`
+is available for offline execution checks, not a meaningful frozen-feature baseline.
+
+DINOv3 deliberately uses the same letterboxed image input as ResNet-18 to retain
+both athletes. This is the project's preprocessing choice, rather than the
+official processor's direct resize. The backbone is recomputed per batch; feature
+caching is not implemented. Training, validation metrics, checkpoints and AdamW
+options use the shared pipeline. Full checkpoints include the frozen weights,
+so resume and evaluation reconstruct the model offline without Hub access.
+
+```bash
+RUN_NAME=dinov3-head bash launchers/START_TRAINING.sh \
+    --model image-dinov3 --epochs 20 --lr 0.001 --weight-decay 0.0001
+```
 
 The following are training examples to run after preparing the data and shared
 split and choosing the model experiment. Setup and split preparation do not
@@ -416,8 +473,8 @@ For an optional experiment with horizontal mirroring and dropout enabled:
 RUN_NAME=pose-wide-mirror-dropout bash launchers/START_TRAINING.sh --model pose-wide --epochs 30 --horizontal-flip-prob 0.5 --dropout 0.2
 ```
 
-Both flags also work with `pose`, `pose-attention`, and `image`. The examples
-without these flags retain mirroring and dropout at zero.
+Both flags also work with `pose`, `pose-attention`, `image`, and `image-dinov3`.
+The examples without these flags retain mirroring and dropout at zero.
 
 For attention dropout of 0.1 and block MLP dropout of 0.3:
 
@@ -442,7 +499,7 @@ Multiview runs also print validation macro F1 for `held_out_view` and
 `val.by_evaluation_type`. The usual `val` metrics pool both subsets, and pooled
 validation macro F1 selects `best.pt`.
 
-Compilation is optional and **off by default** for all four models. Add
+Compilation is optional and **off by default** for all five models. Add
 `--compile` to pass the **whole model** to `torch.compile` using PyTorch's
 default Inductor backend; there are no block-level compile decorators:
 
@@ -457,6 +514,13 @@ shapes can trigger compilation, so early ETA estimates can be inflated. Speed
 gains depend on the model and workload. See the
 [PyTorch compile options](https://docs.pytorch.org/docs/2.11/generated/torch.compile.html).
 Compiler errors are surfaced; the project does not silently switch compilation off.
+DINOv3 uses this same whole-model option. Its CUDA compilation and speedup must
+be checked on the DGX; earlier smoke results for the other four models do not
+validate this new backbone. To check it explicitly without downloading weights:
+
+```bash
+.venv/bin/python -m src.Scripts.smoke_test --model image-dinov3 --device cuda --compile
+```
 
 CUDA is required by default; unavailable CUDA fails clearly. Data-loading workers,
 batch size, seed, learning rate and weight decay can be set with CLI flags; see `--help`. Run
@@ -608,13 +672,17 @@ JIUJITSU_RUN_TORCH_TESTS=1 python -B -m unittest discover -s tests -v
 ```
 
 Split allocation and its tests require NumPy. The integration tests also require
-PyTorch, torchvision and tqdm. They cover training, resume and evaluation for all
-four models, augmentation, configurable weight decay, independent dropout
+PyTorch, torchvision, tqdm and Transformers. They cover training, resume and evaluation,
+augmentation, configurable weight decay, independent dropout
 branches and checkpoint reconstruction with nondefault attention settings.
 They verify that resumed CPU weights match uninterrupted training and that
 progress reporting preserves weights, metrics and RNG state.
 Whole-model compilation checks exercise real TorchDynamo graph capture with
-the CPU `eager` backend for all four models, plus checkpoint portability and
+the CPU `eager` backend for all five models, plus checkpoint portability and
 runtime-option overrides. These do not validate native CUDA/Inductor compilation
 or establish a speedup; use the compiled DGX smoke command for that execution path.
+DINOv3 tests cover a real randomly initialized ViT-B/16 forward/backward pass,
+whole-model CPU graph capture, frozen gradients and offline checkpoint reconstruction.
+Small substitute-backbone fixtures exercise its shared training/resume/evaluation
+integration and pretrained-loading error paths without downloading gated weights.
 Synthetic execution checks do not measure model quality on the real dataset.

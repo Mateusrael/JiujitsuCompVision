@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RESUME_NAME = re.compile(r"config_resume_epoch(\d+)_(.+)\.json\Z")
 SETTINGS = ("model", "lr", "weight_decay", "dropout", "attention_dropout",
             "attention_mlp_dropout", "horizontal_flip_prob", "batch_size", "seed",
-            "fine_tune", "compile", "annotation_sha256", "split_sha256", "pose_filter",
+            "fine_tune", "image_training", "compile", "annotation_sha256", "split_sha256", "pose_filter",
             "checkpoint_selection")
 EVALUATION_TYPES = ("held_out_view", "unseen_moment")
 GROUP_SCORES = ("accuracy", "loss", "macro_f1", "samples")

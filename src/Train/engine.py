@@ -18,7 +18,7 @@ from src.Loader.datasets import ImageDataset, PoseDataset
 from src.Loader.splits import filter_pose_records, read_manifest, split_records
 from src.Modules.execution import compile_model
 from src.Modules.models import architecture_config, build_model
-from src.Modules.registry import POSE_MODEL_NAMES
+from src.Modules.registry import IMAGE_MODEL_NAMES, POSE_MODEL_NAMES
 from src.Train.checkpoints import (load_checkpoint, random_state, restore_random_state,
                                    save_checkpoint)
 from src.Train.config import ATTENTION_DEFAULTS, resolve_run_dir, resolve_settings
@@ -97,7 +97,7 @@ def make_dataset(model, records, config, *, training=False):
         return PoseDataset(records, config["class_names"], config["label_map"],
                            swap_athletes=training and config["swap_athletes"],
                            horizontal_flip_prob=flip_probability)
-    if model != "image":
+    if model not in IMAGE_MODEL_NAMES:
         raise ValueError(f"Unknown model: {model!r}")
     return ImageDataset(records, config["class_names"], config["label_map"],
                         config["images_dir"], horizontal_flip_prob=flip_probability)
@@ -197,6 +197,8 @@ def train_epoch(model, loader, optimizer, device, *, progress=True,
 def configured_architecture(model, num_classes, config):
     options = ({name: config[name] for name in ATTENTION_DEFAULTS}
                if model == "pose-attention" else {})
+    if model in IMAGE_MODEL_NAMES:
+        options["image_training"] = config.get("image_training")
     return architecture_config(model, num_classes, fine_tune=config["fine_tune"],
                                dropout=config["dropout"], **options)
 
@@ -236,8 +238,8 @@ def train(args):
     if checkpoint:
         validate_checkpoint_data(previous, args.model, annotations_path, split_path, manifest)
     images_dir = args.images_dir or (previous or {}).get("images_dir")
-    if args.model == "image" and not images_dir:
-        raise ValueError("--images-dir is required for the image model")
+    if args.model in IMAGE_MODEL_NAMES and not images_dir:
+        raise ValueError("--images-dir is required for image models")
     images_dir = str(Path(images_dir).expanduser().resolve()) if images_dir else None
     if checkpoint and images_dir != previous.get("images_dir"):
         raise ValueError("Cannot change the image directory while resuming")
@@ -276,6 +278,12 @@ def train(args):
     del records, selected_records
     model = build_model(config["model_config"],
                         pretrained=config["pretrained"] and checkpoint is None).to(device)
+    if args.model in IMAGE_MODEL_NAMES:
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        config["parameter_counts"] = {"trainable": trainable, "frozen": total - trainable, "total": total}
+        print(f"Image training: {config['image_training']} | "
+              f"{trainable:,} trainable / {total:,} total parameters", flush=True)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),
                                   lr=config["lr"], weight_decay=config["weight_decay"])
     best_macro_f1 = -1.0

@@ -14,7 +14,7 @@ from src.Modules.execution import COMPILE_MODES, compile_model
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=(*MODEL_NAMES, "both", "all"), default="all",
-                        help="Default: all four models; both retains the original pose/image check")
+                        help="Default: all five models; both retains the original pose/image check")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False,
                         help="Exercise whole-model compilation; default: disabled")

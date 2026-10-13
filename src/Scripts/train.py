@@ -9,6 +9,7 @@ if __package__ in (None, ""):
 
 from src.Modules.registry import MODEL_NAMES
 from src.Modules.execution import COMPILE_MODES
+from src.Modules.image_training import IMAGE_TRAINING_MODES
 
 
 def build_parser():
@@ -35,9 +36,12 @@ def build_parser():
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=None,
                         help="Show epoch and batch progress bars; fresh default: enabled")
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=None,
-                        help="ImageNet ResNet-18 weights (default); --no-pretrained permits offline smoke")
-    parser.add_argument("--fine-tune", action=argparse.BooleanOptionalAction, default=None,
-                        help="Train image backbone too; by default train only its classifier head")
+                        help="Pretrained image backbone weights (default); --no-pretrained permits offline smoke")
+    image_training = parser.add_mutually_exclusive_group()
+    image_training.add_argument("--image-training", choices=IMAGE_TRAINING_MODES,
+                                help="ResNet: head (default), layer4 plus head, or full; DINOv3 supports head only")
+    image_training.add_argument("--fine-tune", action=argparse.BooleanOptionalAction, default=None,
+                                help="Legacy ResNet alias: --fine-tune selects full training; --no-fine-tune selects head")
     parser.add_argument("--swap-athletes", action=argparse.BooleanOptionalAction, default=None,
                         help="Randomly swap pose slots during training (default: enabled for 10 classes)")
     parser.add_argument("--horizontal-flip-prob", type=float,

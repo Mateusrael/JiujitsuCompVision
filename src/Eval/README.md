@@ -15,7 +15,7 @@ or hyperparameters. Each subset receives its own loss, accuracy, macro F1,
 per-class metrics, and confusion matrix.
 
 Pose models evaluate only examples with both athletes' supplied poses. The
-image classifier includes single-pose images, so its sample population differs.
+image classifiers include single-pose images, so their sample population differs.
 The manifest coordinates section assignments and reports counts for both
 populations. Scores are saved under `metrics`, with the subset breakdown under
 `metrics.by_evaluation_type`; the output also records sample eligibility counts.
@@ -25,12 +25,19 @@ dimensions, block/head counts, separate attention and block MLP dropout rates,
 and pooling choices. Evaluation does not
 select a new architecture or download pretrained weights. `pose`, `pose-wide`
 and `pose-attention` all receive the same normalized 102 pose features; `image`
-receives the corresponding full frames. Every model returns ten logits, and the
-largest logit determines the predicted class. Pose results assume supplied
+and `image-dinov3` receive the corresponding full frames. Every model returns ten
+logits, and the largest logit determines the predicted class. Pose results assume supplied
 skeletons and do not evaluate pose extraction or temporal video modeling.
 
-Evaluation disables dropout for all four models and never mirrors examples or
+Evaluation disables dropout for all five models and never mirrors examples or
 swaps athlete slots, regardless of the saved training augmentation settings.
+
+DINOv3 evaluation reconstructs the pinned ViT-B/16 configuration locally and
+loads its frozen backbone and linear head from the project checkpoint. It needs
+the installed Transformers backend, but no Hub login or pretrained download.
+The same 224 × 224 letterboxing and ImageNet normalization used during training
+are applied; this is a project preprocessing choice, not the official processor's
+direct resize.
 
 The test batch progress bar is enabled by default and shows running loss and
 accuracy, batch counts, throughput, elapsed time and ETA. `--no-progress` hides
