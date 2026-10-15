@@ -70,6 +70,10 @@ class ImageClassifier(nn.Module):
         self.backbone.requires_grad_(self.image_training == "full")
         if self.image_training == "layer4":
             self.backbone.layer4.requires_grad_(True)
+        elif self.image_training == "input-head":
+            # Adapt the first convolution; all BatchNorm weights and statistics
+            # retain their pretrained values, including those in the stem.
+            self.backbone.conv1.requires_grad_(True)
         self.train(self.training)
 
     def train(self, mode=True):
@@ -108,8 +112,9 @@ def architecture_config(model, num_classes=10, *, fine_tune=None, dropout=0.0,
             config["image_training"] = mode
         return config
     if model == "image-dinov3":
-        if resolve_image_training(image_training, fine_tune) != "head":
-            raise ValueError("image-dinov3 supports only frozen-backbone head training")
+        mode = resolve_image_training(image_training, fine_tune)
+        if mode not in ("head", "input-head"):
+            raise ValueError("image-dinov3 supports only head or input-head training")
         if (isinstance(num_classes, bool) or not isinstance(num_classes, int)
                 or num_classes <= 0):
             raise ValueError("num_classes must be a positive integer")
@@ -117,7 +122,7 @@ def architecture_config(model, num_classes=10, *, fine_tune=None, dropout=0.0,
                 "backend": "transformers", "backend_version": DINOV3_TRANSFORMERS_VERSION,
                 "weights_id": DINOV3_WEIGHTS_ID,
                 "backbone_config": dict(DINOV3_BACKBONE_CONFIG), "pooling": "cls",
-                "fine_tune": False, "image_training": "head", "image_size": 224,
+                "fine_tune": mode != "head", "image_training": mode, "image_size": 224,
                 "image_preprocessing": "letterbox_imagenet_v1", "dropout": float(dropout)}
     if model == "pose-wide":
         if (isinstance(num_classes, bool) or not isinstance(num_classes, int)
@@ -209,7 +214,7 @@ def build_model(config, *, pretrained=False):
             raise ValueError(f"Unsupported model configuration: {config!r}")
         from src.Modules.dinov3 import FrozenDINOv3Classifier
         model = FrozenDINOv3Classifier(config["num_classes"], pretrained=pretrained,
-                                       dropout=config["dropout"])
+                                       dropout=config["dropout"], image_training=config["image_training"])
     else:
         raise ValueError(f"Unsupported model configuration: {config!r}")
     if config != expected:

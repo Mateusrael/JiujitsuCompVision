@@ -9,6 +9,11 @@ environment. Training uses one GPU per process.
 Code is organized into thin launchers and scripts, reusable feature modules,
 and separate per-experiment outputs.
 
+For a batch of experiments, use the [concurrent training queue](docs/training_queue.md).
+It runs up to six trainings at once from one terminal, selects a GPU at each
+launch using current memory/utilization, and keeps a separate attachable tqdm
+log for every job. The manager continues in the background when a viewer closes.
+
 ```text
 install/        environment probe and Linux dependency setup
 launchers/      editable paths and commands to run common operations
@@ -328,8 +333,8 @@ these models extracts poses from images or models changes across video frames.
 | `pose` | `102 → 102 → 34 → 10`, ReLU after both hidden layers | All parameters, initialized randomly |
 | `pose-wide` | `102 → 512 → 128 → 32 → 10`, ReLU after all three hidden layers | All parameters, initialized randomly |
 | `pose-attention` | 34 joint tokens, four attention/MLP blocks, pooled features → 10 | All parameters, initialized randomly |
-| `image` | ImageNet-pretrained ResNet-18 with a replacement `512 → 10` classifier | `--image-training head` (default), `layer4` plus classifier, or `full` |
-| `image-dinov3` | DINOv3-pretrained ViT-B/16 CLS features → `768 → 10` classifier | Frozen backbone; only the 7,690-parameter classifier trains |
+| `image` | ImageNet-pretrained ResNet-18 with a replacement `512 → 10` classifier | `head` (default), `input-head`, `layer4` plus classifier, or `full` |
+| `image-dinov3` | DINOv3-pretrained ViT-B/16 CLS features → `768 → 10` classifier | `head` (default) or patch projection plus classifier with `input-head` |
 
 Horizontal mirroring and dropout are optional for all five models and are
 **disabled by default**:
@@ -391,6 +396,9 @@ the new `512 → 10` classifier takes its place. Choose the trainable scope with
 `--image-training`:
 
 - `head` (default): freeze the entire backbone, including BatchNorm statistics.
+- `input-head`: train the first convolution and classifier. All other backbone
+  weights and all BatchNorm statistics stay frozen. For ResNet-18 this trains
+  **14,538 parameters**.
 - `layer4`: train the last residual stage (both blocks) and the classifier.
   The initial convolution and stages `layer1`–`layer3` stay frozen, including
   their BatchNorm statistics. BatchNorm in `layer4` updates during training.
@@ -411,16 +419,23 @@ remain aliases for `full` and `head`; do not combine them with `--image-training
 Use `--no-pretrained` for an explicitly untrained image baseline or smoke check. See
 [the module documentation](src/Modules/README.md) for the architecture contracts.
 
-### DINOv3 frozen image features
+### DINOv3 image features
 
 `--model image-dinov3` uses the official
 [`facebook/dinov3-vitb16-pretrain-lvd1689m` weights](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m)
 through Transformers 4.57.1. The ViT-B/16 backbone has 12 blocks, 12 attention
 heads, four register tokens, and 768-dimensional features. Its normalized CLS
-token feeds optional dropout and a new `768 → 10` linear classifier. Only the
-classifier's **7,690 parameters** train; the approximately 86-million-parameter
-backbone stays frozen and in evaluation mode. This mode does not support
-`--image-training layer4`, `full`, or `--fine-tune`.
+token feeds optional dropout and a new `768 → 10` linear classifier.
+`--image-training head` (default) trains only the classifier's **7,690 parameters**.
+`--image-training input-head` also trains the existing 16 × 16 patch projection,
+for **598,282 trainable parameters**. Transformer blocks, normalization, and
+special tokens remain frozen. Both modes keep the backbone in evaluation mode
+to disable positional augmentation. DINOv3 does not support `layer4`, `full`,
+or the legacy `--fine-tune` alias.
+
+Input-head training must propagate gradients through the frozen intermediate
+layers to reach the input projection. It requires more computation and activation
+memory than head-only training despite updating relatively few parameters.
 
 The official weights require access approval. Review the conditions on the model
 page using your Hugging Face account, then authenticate interactively on the DGX:
@@ -544,7 +559,32 @@ These are experiment settings, not established optimal values. Lower learning
 rates may need more epochs to converge. Changing several settings together tests
 the combination; separate runs are needed to isolate each setting's contribution.
 
-Resume from the last checkpoint and extend the total epoch count:
+To adapt the input layer using an already trained image classifier, start a
+new run with `--init-from` and a trusted project `best.pt` or `last.pt` checkpoint:
+
+```bash
+.venv/bin/python -m src.Scripts.train \
+    --init-from trainings/dinov3-head/checkpoints/best.pt \
+    --run-dir trainings/dinov3-input-head \
+    --image-training input-head --epochs 5 --lr 1e-5 \
+    --weight-decay 0.0001 --dropout 0.15 --horizontal-flip-prob 0.5
+```
+
+The same option works for ResNet checkpoints. This copies model weights into
+a new run, including the trained classifier, and starts a fresh optimizer,
+epoch counter, random state and best-validation score. Model and data paths
+can be omitted to use the source checkpoint's values. Annotation/split hashes,
+class definitions, image directory and model architecture must match; training
+scope and classifier dropout can change. Training hyperparameters use fresh-run
+defaults unless explicitly supplied. The pretrained-weight origin is inherited
+from the source and cannot be overridden. The run records the source checkpoint's
+path, epoch and SHA-256. The example's low learning rate is an experiment setting.
+For ResNet, subsequent stages can also select `layer4` or `full`; DINOv3 currently
+supports only `head` and `input-head`.
+
+`--resume` continues an existing run with its optimizer and settings, and cannot
+be combined with `--init-from`. Resume from the last checkpoint and extend the
+total epoch count:
 
 ```bash
 bash launchers/CONTINUE_TRAINING.sh --resume trainings/pose-baseline/checkpoints/last.pt --epochs 60
@@ -682,7 +722,11 @@ the CPU `eager` backend for all five models, plus checkpoint portability and
 runtime-option overrides. These do not validate native CUDA/Inductor compilation
 or establish a speedup; use the compiled DGX smoke command for that execution path.
 DINOv3 tests cover a real randomly initialized ViT-B/16 forward/backward pass,
-whole-model CPU graph capture, frozen gradients and offline checkpoint reconstruction.
+whole-model CPU graph capture, head/input-head gradients and offline checkpoint reconstruction.
+Input-head checks verify that the input projection and classifier update while
+all intermediate weights stay unchanged, including ResNet BatchNorm statistics.
+Warm-start checks cover copied weights, a fresh optimizer/history, source
+checkpoint identity, independent continuation and unchanged source artifacts.
 Small substitute-backbone fixtures exercise its shared training/resume/evaluation
 integration and pretrained-loading error paths without downloading gated weights.
 Synthetic execution checks do not measure model quality on the real dataset.

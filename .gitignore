@@ -22,6 +22,7 @@ dist/
 .env.*
 !.env.example
 launchers/local_config.sh
+launchers/*.local.json
 .ipynb_checkpoints/
 .vscode/
 .idea/

@@ -20,6 +20,7 @@ class ImageTrainingConfigurationTests(unittest.TestCase):
         cases = (([], "head"), (["--no-fine-tune"], "head"),
                  (["--fine-tune"], "full"),
                  (["--image-training", "head"], "head"),
+                 (["--image-training", "input-head"], "input-head"),
                  (["--image-training", "layer4"], "layer4"),
                  (["--image-training", "full"], "full"))
         for flags, mode in cases:
@@ -30,7 +31,7 @@ class ImageTrainingConfigurationTests(unittest.TestCase):
 
     def test_cli_does_not_accept_ambiguous_modes(self):
         parser = build_parser()
-        for mode in ("head", "layer4", "full"):
+        for mode in ("head", "input-head", "layer4", "full"):
             for alias in ("--fine-tune", "--no-fine-tune"):
                 with self.subTest(mode=mode, alias=alias):
                     with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -44,13 +45,13 @@ class ImageTrainingConfigurationTests(unittest.TestCase):
                     resolve_settings(args)
 
     def test_resume_preserves_mode_and_rejects_changes_including_aliases(self):
-        for mode in ("head", "layer4", "full"):
+        for mode in ("head", "input-head", "layer4", "full"):
             previous = self.settings("--image-training", mode)
             with self.subTest(saved=mode):
                 self.assertEqual(self.settings(previous=previous)["image_training"], mode)
                 self.assertEqual(self.settings("--image-training", mode,
                                                previous=previous)["image_training"], mode)
-            for requested in ("head", "layer4", "full"):
+            for requested in ("head", "input-head", "layer4", "full"):
                 if requested == mode:
                     continue
                 with self.subTest(saved=mode, requested=requested):
@@ -80,7 +81,7 @@ class ImageTrainingConfigurationTests(unittest.TestCase):
     def test_metrics_summary_retains_explicit_mode_without_guessing_legacy_modes(self):
         from src.Scripts.export_metrics import summarize
         from tests.test_export_metrics import config_bytes, metric, metrics_bytes
-        for mode in ("head", "layer4", "full", None):
+        for mode in ("head", "input-head", "layer4", "full", None):
             with self.subTest(mode=mode):
                 settings = {} if mode is None else {"image_training": mode}
                 files = {"config_start.json": config_bytes("image", fine_tune=True, **settings),
@@ -108,11 +109,12 @@ class ImageTrainingModelTests(unittest.TestCase):
     @staticmethod
     def is_trainable(name, mode):
         return (name.startswith("classifier.") or mode == "full"
-                or (mode == "layer4" and name.startswith("backbone.layer4.")))
+                or (mode == "layer4" and name.startswith("backbone.layer4."))
+                or (mode == "input-head" and name.startswith("backbone.conv1.")))
 
     def test_optimizer_changes_only_selected_weights_and_batchnorm_buffers(self):
         torch = self.torch
-        for mode in ("head", "layer4", "full"):
+        for mode in ("head", "input-head", "layer4", "full"):
             with self.subTest(mode=mode):
                 model = self.ImageClassifier(pretrained=False, image_training=mode, dropout=0.2)
                 model.train()
@@ -120,6 +122,8 @@ class ImageTrainingModelTests(unittest.TestCase):
                 parameters = dict(model.named_parameters())
                 for name, parameter in parameters.items():
                     self.assertEqual(parameter.requires_grad, self.is_trainable(name, mode), name)
+                if mode == "input-head":
+                    self.assertEqual(sum(p.numel() for p in parameters.values() if p.requires_grad), 14538)
                 optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),
                                               lr=0.001, weight_decay=0.01)
                 features = torch.randn(4, 3, 64, 64)
@@ -132,15 +136,17 @@ class ImageTrainingModelTests(unittest.TestCase):
                         self.assertTrue(torch.isfinite(parameter.grad).all(), name)
                     else:
                         self.assertIsNone(parameter.grad, name)
+                if mode == "input-head":
+                    self.assertGreater(model.backbone.conv1.weight.grad.abs().sum().item(), 0)
                 optimizer.step()
                 for name, value in model.state_dict().items():
                     if not self.is_trainable(name, mode):
                         self.assertTrue(torch.equal(before[name], value), name)
                 self.assertFalse(torch.equal(before["classifier.weight"], model.classifier.weight))
-                if mode != "head":
+                if mode in ("layer4", "full"):
                     self.assertFalse(torch.equal(before["backbone.layer4.0.conv1.weight"],
                                                  model.backbone.layer4[0].conv1.weight))
-                if mode == "full":
+                if mode in ("input-head", "full"):
                     self.assertFalse(torch.equal(before["backbone.conv1.weight"], model.backbone.conv1.weight))
                 for name, module in model.named_modules():
                     if isinstance(module, torch.nn.BatchNorm2d):
@@ -149,7 +155,7 @@ class ImageTrainingModelTests(unittest.TestCase):
 
     def test_repeated_train_eval_keeps_frozen_batchnorm_fixed_and_dropout_active(self):
         torch = self.torch
-        for mode in ("head", "layer4", "full"):
+        for mode in ("head", "input-head", "layer4", "full"):
             with self.subTest(mode=mode):
                 model = self.ImageClassifier(pretrained=False, image_training=mode, dropout=0.4)
                 for _ in range(3):
@@ -164,7 +170,7 @@ class ImageTrainingModelTests(unittest.TestCase):
 
     def test_explicit_configuration_and_state_round_trip_preserves_mode(self):
         torch = self.torch
-        for mode in ("head", "layer4", "full"):
+        for mode in ("head", "input-head", "layer4", "full"):
             with self.subTest(mode=mode):
                 config = self.architecture_config("image", image_training=mode, dropout=0.2)
                 self.assertEqual(config["image_training"], mode)
@@ -232,7 +238,35 @@ class ImageTrainingModelTests(unittest.TestCase):
             for name, value in frozen.items():
                 self.assertTrue(torch.equal(model.state_dict()[name], value), name)
 
+    def test_compiled_input_head_reaches_first_layer_through_frozen_stages(self):
+        torch = self.torch
+        model = self.ImageClassifier(pretrained=False, image_training="input-head", dropout=0.2)
+        compiled = torch.compile(model, backend="eager")
+        inputs = torch.randn(2, 3, 64, 64)
+        for _ in range(2):
+            compiled.train()
+            model.zero_grad(set_to_none=True)
+            torch.nn.functional.cross_entropy(compiled(inputs), torch.tensor([0, 3])).backward()
+            self.assertGreater(model.backbone.conv1.weight.grad.abs().sum().item(), 0)
+            self.assertGreater(model.classifier.weight.grad.abs().sum().item(), 0)
+            for name, parameter in model.backbone.named_parameters():
+                if not name.startswith("conv1."):
+                    self.assertIsNone(parameter.grad, name)
+            for module in model.modules():
+                if isinstance(module, torch.nn.BatchNorm2d):
+                    self.assertFalse(module.training)
+                    self.assertEqual(module.num_batches_tracked.item(), 0)
+            compiled.eval()
+            with torch.inference_mode():
+                compiled(inputs)
+
     def test_layer4_train_resume_evaluate_matches_continuous_training(self):
+        self._check_train_resume_evaluate("layer4")
+
+    def test_input_head_train_resume_evaluate_matches_continuous_training(self):
+        self._check_train_resume_evaluate("input-head")
+
+    def _check_train_resume_evaluate(self, mode):
         from tests.test_training import synthetic_files
         from src.Eval.evaluate import evaluate
         from src.Scripts.evaluate import build_parser as evaluation_parser
@@ -242,7 +276,7 @@ class ImageTrainingModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             annotations, split, images, _ = synthetic_files(root, images=True)
-            common = ["--model", "image", "--image-training", "layer4", "--no-pretrained",
+            common = ["--model", "image", "--image-training", mode, "--no-pretrained",
                       "--annotations", str(annotations), "--split", str(split),
                       "--images-dir", str(images), "--device", "cpu", "--workers", "0",
                       "--batch-size", "10", "--dropout", "0.2", "--horizontal-flip-prob", "0.5",
@@ -252,21 +286,25 @@ class ImageTrainingModelTests(unittest.TestCase):
             last = run / "checkpoints" / "last.pt"
             first = load_checkpoint(last)
             self.assertEqual(first["model_state"]["backbone.bn1.num_batches_tracked"].item(), 0)
-            self.assertEqual(first["model_state"]["backbone.layer4.0.bn1.num_batches_tracked"].item(), 1)
+            self.assertEqual(first["model_state"]["backbone.layer4.0.bn1.num_batches_tracked"].item(),
+                             1 if mode == "layer4" else 0)
             train(build_parser().parse_args(["--resume", str(last), "--epochs", "2"]))
             second = load_checkpoint(last)
             self.assertEqual(second["epoch"], 2)
             self.assertEqual(second["config"]["model_config"], first["config"]["model_config"])
-            self.assertEqual(second["config"]["image_training"], "layer4")
-            self.assertEqual(second["config"]["model_config"]["image_training"], "layer4")
-            self.assertEqual(second["model_state"]["backbone.layer4.0.bn1.num_batches_tracked"].item(), 2)
+            self.assertEqual(second["config"]["image_training"], mode)
+            self.assertEqual(second["config"]["model_config"]["image_training"], mode)
+            self.assertEqual(second["model_state"]["backbone.layer4.0.bn1.num_batches_tracked"].item(),
+                             2 if mode == "layer4" else 0)
             for name, value in first["model_state"].items():
-                if not self.is_trainable(name, "layer4"):
+                if not self.is_trainable(name, mode):
                     self.assertTrue(torch.equal(value, second["model_state"][name]), name)
-            for mode in ("head", "full"):
+            for requested in ("head", "input-head", "layer4", "full"):
+                if requested == mode:
+                    continue
                 with self.assertRaisesRegex(ValueError, "Cannot change"):
                     train(build_parser().parse_args(["--resume", str(last), "--epochs", "3",
-                                                     "--image-training", mode]))
+                                                     "--image-training", requested]))
             result = evaluate(evaluation_parser().parse_args([
                 "--checkpoint", str(run / "checkpoints" / "best.pt"), "--device", "cpu", "--no-progress"]))
             self.assertEqual(result["metrics"]["samples"], 10)

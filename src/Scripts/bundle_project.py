@@ -30,6 +30,7 @@ def source_files(root):
                                 for part in relative.parts)
                     and path.suffix in SOURCE_SUFFIXES
                     and path.name != "local_config.sh"
+                    and not (relative.parts[0] == "launchers" and path.name.endswith(".local.json"))
                     and not any(parent.is_symlink() for parent in path.parents
                                 if parent != root and root in parent.parents)):
                 yield path

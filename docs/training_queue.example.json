@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "max_parallel": 6,
+  "poll_seconds": 10,
+  "max_gpu_utilization": 100,
+  "defaults": {
+    "annotations": "Data/annotations.json",
+    "split": "Data/splits/multiview_sections_shifted.json",
+    "compile": true,
+    "workers": 2,
+    "batch_size": 128,
+    "seed": 43,
+    "horizontal_flip_prob": 0.5
+  },
+  "jobs": [
+    {
+      "id": "attention-small",
+      "min_free_mib": 4096,
+      "train": {
+        "model": "pose-attention",
+        "epochs": 100,
+        "lr": 0.0003,
+        "weight_decay": 0.05,
+        "attention_dim": 32,
+        "attention_heads": 4,
+        "attention_layers": 2,
+        "attention_mlp_dim": 128,
+        "attention_dropout": 0.0,
+        "attention_mlp_dropout": 0.4,
+        "attention_pooling": "mean"
+      }
+    },
+    {
+      "id": "resnet-input-head",
+      "min_free_mib": 16384,
+      "train": {
+        "model": "image",
+        "images_dir": "Data/images",
+        "image_training": "input-head",
+        "epochs": 5,
+        "lr": 0.00001,
+        "weight_decay": 0.0001,
+        "dropout": 0.15
+      }
+    }
+  ]
+}

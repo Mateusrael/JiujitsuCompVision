@@ -14,12 +14,16 @@ from src.Modules.image_training import IMAGE_TRAINING_MODES
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=MODEL_NAMES, help="Required for a fresh run")
-    parser.add_argument("--annotations", help="Required for a fresh run; restored on resume")
-    parser.add_argument("--split", help="Shared split manifest; restored on resume")
+    parser.add_argument("--model", choices=MODEL_NAMES, help="Required unless restored from a checkpoint")
+    parser.add_argument("--annotations", help="Required unless restored from a checkpoint")
+    parser.add_argument("--split", help="Shared split manifest; can be restored from a checkpoint")
     parser.add_argument("--images-dir", help="Directory containing seven-digit image filenames")
     parser.add_argument("--run-dir", help="New run directory; required unless resuming")
-    parser.add_argument("--resume", help="Resume this run's checkpoints/last.pt (trusted files only)")
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument("--resume", help="Resume this run's checkpoints/last.pt (trusted files only)")
+    initialization.add_argument("--init-from",
+                                help="Start a new image run from trusted project checkpoint weights; "
+                                     "fresh optimizer and training settings, same data and split")
     parser.add_argument("--epochs", type=int, help="Total target epochs; fresh default: 20")
     parser.add_argument("--batch-size", type=int, help="Fresh default: 128")
     parser.add_argument("--lr", type=float, help="Fresh default: 0.001")
@@ -39,7 +43,8 @@ def build_parser():
                         help="Pretrained image backbone weights (default); --no-pretrained permits offline smoke")
     image_training = parser.add_mutually_exclusive_group()
     image_training.add_argument("--image-training", choices=IMAGE_TRAINING_MODES,
-                                help="ResNet: head (default), layer4 plus head, or full; DINOv3 supports head only")
+                                help="Both image models: head (default) or input-head; "
+                                     "ResNet also supports layer4 plus head or full")
     image_training.add_argument("--fine-tune", action=argparse.BooleanOptionalAction, default=None,
                                 help="Legacy ResNet alias: --fine-tune selects full training; --no-fine-tune selects head")
     parser.add_argument("--swap-athletes", action=argparse.BooleanOptionalAction, default=None,

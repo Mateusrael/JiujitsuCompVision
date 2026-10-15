@@ -79,7 +79,7 @@ torchvision ResNet-18 and a replacement linear classifier, selected by
 `--model image`. Fresh image runs default to
 `ResNet18_Weights.DEFAULT`; a first run may download these weights. The backbone
 is frozen by default, including BatchNorm running statistics. `--image-training`
-selects `head`, `layer4`, or `full`. Input is `(B, 3, 224, 224)`.
+selects `head`, `input-head`, `layer4`, or `full`. Input is `(B, 3, 224, 224)`.
 
 For a 224 × 224 image, the backbone has a 7 × 7 stride-2 convolution, BatchNorm,
 ReLU and a 3 × 3 stride-2 max pool, then four stages with channel widths
@@ -92,7 +92,11 @@ The original ImageNet `512 → 1000` classification layer is replaced with an
 identity operation inside `backbone`; `classifier = Linear(512, 10)` takes its
 place in the full model. It is not stacked after the original 1,000 predictions.
 The new classifier is initialized randomly. Default training updates only its
-weights and bias. Mode `layer4` also trains both residual blocks in the last
+weights and bias. Mode `input-head` also trains only `backbone.conv1`, the first
+7 × 7 convolution. All other weights and all BatchNorm running statistics,
+including the initial BatchNorm, stay frozen. It trains **14,538 parameters**.
+Gradients pass through the frozen stages to reach the first convolution.
+Mode `layer4` also trains both residual blocks in the last
 stage, leaving the initial convolution and stages 1–3 frozen. Mode `full` trains
 all backbone parameters. Freezing a stage disables its gradients and keeps its
 BatchNorm running statistics unchanged through every `train()`/`eval()` cycle.
@@ -112,7 +116,7 @@ dropout during validation and test evaluation.
 
 ## DINOv3 image classifier
 
-`dinov3.FrozenDINOv3Classifier(num_classes=10, pretrained=True, dropout=0.0)` is
+`dinov3.FrozenDINOv3Classifier(num_classes=10, pretrained=True, dropout=0.0, image_training="head")` is
 selected by `--model image-dinov3`. It uses Transformers 4.57.1's
 `DINOv3ViTModel` with the official
 [`facebook/dinov3-vitb16-pretrain-lvd1689m` checkpoint](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m).
@@ -124,13 +128,18 @@ ViT-B/16 uses 16 × 16 image patches, 12 transformer blocks with 12 heads,
 768-dimensional embeddings, 3072-dimensional block MLPs, and four register tokens.
 The final normalized CLS token is the image representation (`pooler_output`).
 It passes through optional dropout and `Linear(768, 10)`: **7,690 trainable
-parameters** with roughly 86 million frozen backbone parameters.
+parameters** in the default `head` mode, with roughly 86 million frozen backbone parameters.
 
-The backbone has no trainable scope option: every parameter has gradients
-disabled, and `train()` always keeps it in evaluation mode, including its
-positional augmentation. Feature extraction runs under `no_grad()` while the
-classifier receives gradients normally. Dropout applies only before the head,
-defaults to zero, and is disabled for validation/test.
+Mode `input-head` also trains `backbone.embeddings.patch_embeddings`, the existing
+`Conv2d(3, 768, kernel_size=16, stride=16)` projection, including its bias.
+This gives **598,282 trainable parameters**. Transformer blocks, normalization,
+CLS/register/mask tokens and all other backbone weights remain frozen.
+`train()` keeps the backbone in evaluation mode in both scopes, including its
+positional augmentation. Only `head` uses `no_grad()` for feature extraction;
+`input-head` retains the computation graph through the frozen transformer to
+reach the patch projection. This requires more activation memory and computation
+than head-only training. Dropout applies only before the head, defaults to zero,
+and is disabled for validation/test. Other DINOv3 training scopes are unsupported.
 
 Input is the same `(B, 3, 224, 224)` letterboxed, ImageNet-normalized full frame
 used by ResNet-18. Letterboxing is an intentional project choice to preserve

@@ -1,4 +1,4 @@
-"""Frozen DINOv3 ViT-B/16 image features with a trainable linear classifier."""
+"""DINOv3 ViT-B/16 with head-only or input-projection-and-head training."""
 
 import math
 from numbers import Real
@@ -38,7 +38,8 @@ def _validate_backbone_config(config):
 
 
 class FrozenDINOv3Classifier(nn.Module):
-    def __init__(self, num_classes=10, *, pretrained=True, dropout=0.0):
+    def __init__(self, num_classes=10, *, pretrained=True, dropout=0.0,
+                 image_training="head"):
         super().__init__()
         if (isinstance(num_classes, bool) or not isinstance(num_classes, int)
                 or num_classes <= 0):
@@ -48,6 +49,9 @@ class FrozenDINOv3Classifier(nn.Module):
             raise ValueError("dropout must be a finite number in [0, 1)")
         if not isinstance(pretrained, bool):
             raise ValueError("pretrained must be a boolean")
+        if image_training not in ("head", "input-head"):
+            raise ValueError("DINOv3 image_training must be head or input-head")
+        self.image_training = image_training
         config_class, model_class = _transformers_classes()
         if pretrained:
             try:
@@ -63,24 +67,32 @@ class FrozenDINOv3Classifier(nn.Module):
                 ) from error
             _validate_backbone_config(self.backbone.config)
         else:
-            # Full project checkpoints include the frozen backbone weights.
+            # Full project checkpoints include all backbone weights.
             # This path also supports random-weight smoke tests without network.
             self.backbone = model_class(config_class(**DINOV3_BACKBONE_CONFIG))
         self.backbone.requires_grad_(False)
+        if self.image_training == "input-head":
+            # The patch projection is the input layer. Keep the CLS, register,
+            # and mask tokens frozen along with every transformer block.
+            self.backbone.get_input_embeddings().requires_grad_(True)
         self.dropout = nn.Dropout(float(dropout))
         self.classifier = nn.Linear(DINOV3_BACKBONE_CONFIG["hidden_size"], num_classes)
         self.train(self.training)
 
     def train(self, mode=True):
         super().train(mode)
-        # Keep frozen features deterministic, including RoPE coordinate
+        # Keep backbone execution deterministic, including RoPE coordinate
         # augmentation, while allowing the classification head's dropout.
         self.backbone.eval()
         return self
 
     def forward(self, images):
-        # Do not use inference_mode: the head needs to save these features for
-        # its weight gradients even though the backbone itself remains frozen.
-        with torch.no_grad():
+        if self.image_training == "head":
+            # The head saves these frozen features for its own weight gradients.
+            with torch.no_grad():
+                features = self.backbone(pixel_values=images).pooler_output
+        else:
+            # Frozen middle weights still need to propagate gradients back to
+            # the trainable input projection. Respect any outer inference mode.
             features = self.backbone(pixel_values=images).pooler_output
         return self.classifier(self.dropout(features))

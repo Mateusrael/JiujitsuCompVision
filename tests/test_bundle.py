@@ -11,7 +11,7 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in ("src/Scripts/train.py", "README.md", "Data/annotations.json",
-                         "trainings/run/model.pt", "launchers/local_config.sh", ".env",
+                         "trainings/run/model.pt", "launchers/local_config.sh", "launchers/queue.local.json", ".env",
                          "src/__pycache__/module.pyc", "launchers/START_TRAINING.sh"):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)

@@ -61,8 +61,8 @@ def resolve_settings(args, previous=None):
                 resolve_image_training(requested_mode, requested_fine_tune))
         if previous is not None and mode != saved_mode:
             raise ValueError("Cannot change --image-training when resuming")
-        if args.model == "image-dinov3" and mode != "head":
-            raise ValueError("image-dinov3 supports only frozen-backbone head training")
+        if args.model == "image-dinov3" and mode not in ("head", "input-head"):
+            raise ValueError("image-dinov3 supports only head or input-head training")
         resolved["image_training"] = mode
         resolved["fine_tune"] = mode != "head"
     for name, default in ATTENTION_DEFAULTS.items():

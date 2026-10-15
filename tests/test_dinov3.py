@@ -1,4 +1,4 @@
-"""Frozen DINOv3 contracts, real Base-model gradients, and offline run restoration."""
+"""DINOv3 training modes, real Base-model gradients, and offline restoration."""
 
 import copy
 import json
@@ -38,6 +38,20 @@ class DINOv3ConfigurationTests(unittest.TestCase):
             with self.subTest(flags=flags), self.assertRaises(ValueError):
                 self.settings(*flags)
 
+    def test_input_head_mode_is_explicit_and_cannot_change_on_resume(self):
+        previous = self.settings("--image-training", "input-head", "--dropout", "0.2")
+        self.assertEqual(previous["image_training"], "input-head")
+        self.assertTrue(previous["fine_tune"])
+        resumed = self.settings("--epochs", "30", previous=previous)
+        self.assertEqual(resumed["image_training"], "input-head")
+        self.assertEqual(resumed["dropout"], 0.2)
+        explicit = self.settings("--image-training", "input-head", previous=previous)
+        self.assertEqual(explicit["image_training"], "input-head")
+        for flags in (("--image-training", "head"), ("--no-fine-tune",),
+                      ("--image-training", "full"), ("--image-training", "layer4")):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                self.settings(*flags, previous=previous)
+
     def test_resume_preserves_head_settings_and_rejects_training_changes(self):
         previous = self.settings("--dropout", "0.2", "--horizontal-flip-prob", "0.5")
         resumed = self.settings("--epochs", "30", previous=previous)
@@ -46,7 +60,8 @@ class DINOv3ConfigurationTests(unittest.TestCase):
         self.assertEqual(resumed["dropout"], 0.2)
         self.assertEqual(resumed["horizontal_flip_prob"], 0.5)
         for flags in (("--fine-tune",), ("--image-training", "full"),
-                      ("--image-training", "layer4"), ("--dropout", "0.3")):
+                      ("--image-training", "layer4"),
+                      ("--image-training", "input-head"), ("--dropout", "0.3")):
             with self.subTest(flags=flags), self.assertRaises(ValueError):
                 self.settings(*flags, previous=previous)
 
@@ -85,6 +100,9 @@ class DINOv3ModelTests(unittest.TestCase):
                 features = self.projection(pixel_values.mean(dim=(-2, -1)))
                 return SimpleNamespace(pooler_output=features,
                                        last_hidden_state=features[:, None, :])
+
+            def get_input_embeddings(self):
+                return self.projection
 
             @classmethod
             def from_pretrained(cls, *args, **kwargs):
@@ -157,6 +175,84 @@ class DINOv3ModelTests(unittest.TestCase):
         self.assertFalse(torch.equal(head_before, model.classifier.weight))
         for key, value in model.backbone.state_dict().items():
             self.assertTrue(torch.equal(value, before[key]), key)
+
+    def test_actual_input_head_gradients_cross_frozen_transformer_blocks(self):
+        torch = self.torch
+        config = self.architecture_config("image-dinov3", image_training="input-head")
+        self.assertEqual(config["image_training"], "input-head")
+        self.assertTrue(config["fine_tune"])
+        with patch.object(self.Backbone, "from_pretrained",
+                          side_effect=AssertionError("Unexpected download")) as remote:
+            model = self.build_model(config, pretrained=False)
+        remote.assert_not_called()
+        model.train()
+        self.assertFalse(model.backbone.training)
+        self.assertEqual(sum(p.numel() for p in model.parameters() if p.requires_grad), 598282)
+        expected_names = {"backbone.embeddings.patch_embeddings.weight",
+                          "backbone.embeddings.patch_embeddings.bias",
+                          "classifier.weight", "classifier.bias"}
+        self.assertEqual({name for name, p in model.named_parameters() if p.requires_grad},
+                         expected_names)
+        before = {name: value.clone() for name, value in model.state_dict().items()}
+        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),
+                                      lr=0.001, weight_decay=0.01)
+        inputs = torch.randn(2, 3, 32, 32, requires_grad=True)
+        logits = model(inputs)
+        self.assertEqual(tuple(logits.shape), (2, 10))
+        torch.nn.functional.cross_entropy(logits, torch.tensor([0, 9])).backward()
+        self.assertIsNotNone(inputs.grad)
+        self.assertTrue(torch.isfinite(inputs.grad).all())
+        self.assertGreater(inputs.grad.abs().sum().item(), 0)
+        for name, parameter in model.named_parameters():
+            if name in expected_names:
+                self.assertIsNotNone(parameter.grad, name)
+                self.assertTrue(torch.isfinite(parameter.grad).all(), name)
+                self.assertGreater(parameter.grad.abs().sum().item(), 0, name)
+            else:
+                self.assertIsNone(parameter.grad, name)
+        optimizer.step()
+        for name, value in model.state_dict().items():
+            if name in expected_names:
+                self.assertFalse(torch.equal(value, before[name]), name)
+            else:
+                self.assertTrue(torch.equal(value, before[name]), name)
+
+    def test_input_head_keeps_middle_in_eval_and_head_dropout_active(self):
+        torch = self.torch
+        with patch("src.Modules.dinov3._transformers_classes",
+                   return_value=(self.BackboneConfig, self.tiny_backbone_class())):
+            model = self.Classifier(pretrained=False, dropout=0.5, image_training="input-head")
+        inputs = torch.randn(16, 3, 32, 32)
+        for _ in range(2):
+            model.train()
+            self.assertTrue(model.classifier.training)
+            self.assertTrue(model.dropout.training)
+            self.assertTrue(all(not module.training for module in model.backbone.modules()))
+            self.assertTrue(model.backbone.get_input_embeddings().weight.requires_grad)
+            self.assertFalse(torch.equal(model(inputs), model(inputs)))
+            model.eval()
+            self.assertTrue(all(not module.training for module in model.modules()))
+            with torch.inference_mode():
+                first, second = model(inputs), model(inputs)
+                self.assertFalse(first.requires_grad)
+                torch.testing.assert_close(first, second, rtol=0, atol=0)
+
+    def test_input_head_actual_base_model_restores_offline(self):
+        torch = self.torch
+        config = json.loads(json.dumps(self.architecture_config(
+            "image-dinov3", image_training="input-head", dropout=0.3)))
+        with patch.object(self.Backbone, "from_pretrained",
+                          side_effect=AssertionError("Checkpoint restoration must be offline")) as remote:
+            model = self.build_model(config, pretrained=False).eval()
+            restored = self.build_model(config, pretrained=False).eval()
+            restored.load_state_dict(model.state_dict(), strict=True)
+            pixels = torch.randn(1, 3, 32, 32)
+            with torch.inference_mode():
+                torch.testing.assert_close(model(pixels), restored(pixels), rtol=0, atol=0)
+        remote.assert_not_called()
+        self.assertEqual(restored.image_training, "input-head")
+        self.assertEqual([name for name, p in model.named_parameters() if p.requires_grad],
+                         [name for name, p in restored.named_parameters() if p.requires_grad])
 
     def test_head_dropout_stays_active_while_backbone_stays_in_eval(self):
         torch = self.torch
@@ -236,6 +332,43 @@ class DINOv3ModelTests(unittest.TestCase):
         with torch.inference_mode():
             torch.testing.assert_close(compiled(inputs), model(inputs), rtol=0, atol=0)
 
+    def test_whole_base_model_compile_preserves_input_projection_gradients(self):
+        from src.Modules.execution import compile_model
+        torch = self.torch
+        original_compile = torch.compile
+
+        def cpu_graph_capture(model, **options):
+            options.pop("mode", None)
+            return original_compile(model, backend="eager", **options)
+
+        model = self.Classifier(pretrained=False, dropout=0.2, image_training="input-head")
+        with patch("torch.compile", side_effect=cpu_graph_capture) as compiler:
+            compiled = compile_model(model, enabled=True)
+        compiler.assert_called_once_with(model, mode="default")
+        inputs = torch.randn(1, 3, 32, 32)
+        compiled.train()
+        self.assertFalse(model.backbone.training)
+        self.assertTrue(model.dropout.training)
+        torch.nn.functional.cross_entropy(compiled(inputs), torch.tensor([3])).backward()
+        for name, parameter in model.named_parameters():
+            if name.startswith(("backbone.embeddings.patch_embeddings.", "classifier.")):
+                self.assertIsNotNone(parameter.grad, name)
+                self.assertTrue(torch.isfinite(parameter.grad).all(), name)
+                self.assertGreater(parameter.grad.abs().sum().item(), 0, name)
+            else:
+                self.assertIsNone(parameter.grad, name)
+        compiled.eval()
+        with torch.inference_mode():
+            torch.testing.assert_close(compiled(inputs), model(inputs), rtol=0, atol=0)
+
+    def test_constructor_rejects_unsupported_training_modes_before_loading(self):
+        for mode in ("layer4", "full", "input", None, True):
+            with self.subTest(mode=mode), patch(
+                    "src.Modules.dinov3._transformers_classes",
+                    side_effect=AssertionError("Invalid settings must not load weights")):
+                with self.assertRaisesRegex(ValueError, "image_training"):
+                    self.Classifier(image_training=mode)
+
     def test_image_cohort_and_letterboxing_match_resnet_including_missing_poses(self):
         from src.Dataset.annotations import CLASS_NAMES_10, LABEL_MAP_10
         from src.Train.engine import make_dataset, select_model_records
@@ -267,6 +400,12 @@ class DINOv3ModelTests(unittest.TestCase):
                                           training=True).horizontal_flip_prob, 0.5)
 
     def test_train_resume_evaluate_persist_frozen_mode_without_downloads(self):
+        self.assert_train_resume_evaluate("head")
+
+    def test_train_resume_evaluate_persist_input_head_mode_without_downloads(self):
+        self.assert_train_resume_evaluate("input-head")
+
+    def assert_train_resume_evaluate(self, mode):
         from src.Eval.evaluate import evaluate
         from src.Modules.dinov3_config import DINOV3_BACKBONE_CONFIG
         from src.Scripts.evaluate import build_parser as evaluation_parser
@@ -285,7 +424,7 @@ class DINOv3ModelTests(unittest.TestCase):
                     TinyBackbone, "from_pretrained", side_effect=fake_pretrained) as remote:
             root = Path(directory)
             annotations, split, images, _ = synthetic_files(root, images=True)
-            common = ["--model", "image-dinov3", "--pretrained", "--image-training", "head",
+            common = ["--model", "image-dinov3", "--pretrained", "--image-training", mode,
                       "--annotations", str(annotations), "--split", str(split),
                       "--images-dir", str(images), "--device", "cpu", "--workers", "0",
                       "--batch-size", "10", "--dropout", "0.2", "--horizontal-flip-prob", "0.5",
@@ -294,20 +433,24 @@ class DINOv3ModelTests(unittest.TestCase):
             train(build_parser().parse_args(common + ["--run-dir", str(run), "--epochs", "1"]))
             last = run / "checkpoints" / "last.pt"
             first = load_checkpoint(last)
-            self.assertEqual(first["config"]["parameter_counts"]["trainable"], 7690)
+            self.assertEqual(first["config"]["parameter_counts"]["trainable"],
+                             7690 if mode == "head" else 10762)
             self.assertEqual(remote.call_count, 1)
             train(build_parser().parse_args(["--resume", str(last), "--epochs", "2"]))
             self.assertEqual(remote.call_count, 1, "Resume must use saved backbone weights")
             second = load_checkpoint(last)
             self.assertEqual(second["epoch"], 2)
-            self.assertEqual(second["config"]["image_training"], "head")
-            self.assertFalse(second["config"]["fine_tune"])
+            self.assertEqual(second["config"]["image_training"], mode)
+            self.assertEqual(second["config"]["fine_tune"], mode != "head")
             self.assertTrue(second["config"]["pretrained"])
             self.assertEqual(second["config"]["pose_filter"], "not_applicable")
             self.assertEqual(second["config"]["model_config"], first["config"]["model_config"])
             for key, value in first["model_state"].items():
-                if key.startswith("backbone."):
+                if mode == "head" and key.startswith("backbone."):
                     self.assertTrue(torch.equal(value, second["model_state"][key]), key)
+            if mode == "input-head":
+                self.assertFalse(torch.equal(first["model_state"]["backbone.projection.weight"],
+                                             second["model_state"]["backbone.projection.weight"]))
             self.assertFalse(torch.equal(first["model_state"]["classifier.weight"],
                                          second["model_state"]["classifier.weight"]))
             metrics = [json.loads(line) for line in

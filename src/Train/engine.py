@@ -1,5 +1,6 @@
 """Training and validation over the same verified split manifest for all models."""
 
+import hashlib
 import json
 import random
 import sys
@@ -218,16 +219,54 @@ def validate_checkpoint_data(config, model, annotations_path, split_path, manife
         raise ValueError("Checkpoint architecture/preprocessing configuration is unsupported")
 
 
+def validate_initialization_architecture(source, target):
+    """A new image-training stage may change trainability and head dropout only."""
+    allowed = {"fine_tune", "image_training", "dropout"}
+    source_architecture = {key: value for key, value in source.items() if key not in allowed}
+    target_architecture = {key: value for key, value in target.items() if key not in allowed}
+    if source_architecture != target_architecture:
+        raise ValueError("--init-from requires matching architecture and preprocessing")
+
+
 def train(args):
+    init_from = getattr(args, "init_from", None)
+    if args.resume and init_from:
+        raise ValueError("--resume and --init-from are mutually exclusive")
     run_dir = resolve_run_dir(args.run_dir, args.resume)
     checkpoint = load_checkpoint(args.resume) if args.resume else None
     previous = checkpoint["config"] if checkpoint else None
+    initialization = None
+    if init_from:
+        init_from = Path(init_from).expanduser().resolve()
+        if init_from.name not in ("best.pt", "last.pt") or init_from.parent.name != "checkpoints":
+            raise ValueError("--init-from must use <run-dir>/checkpoints/best.pt or last.pt")
+        # Training replaces checkpoint files atomically. Keep one open handle so
+        # the recorded digest identifies exactly the weights loaded into memory.
+        with init_from.open("rb") as handle:
+            initialization = load_checkpoint(handle)
+            handle.seek(0)
+            initialization_sha256 = hashlib.file_digest(handle, "sha256").hexdigest()
+        if initialization["config"].get("model") not in IMAGE_MODEL_NAMES:
+            raise ValueError("--init-from supports image checkpoints only")
+    source_config = previous if checkpoint else (initialization or {}).get("config")
     for name in ("model", "annotations", "split"):
         if getattr(args, name) is None:
-            saved = (previous or {}).get(name)
+            saved = (source_config or {}).get(name)
             if saved is None:
                 raise ValueError(f"A fresh run requires --{name}")
             setattr(args, name, saved)
+    if initialization and args.model not in IMAGE_MODEL_NAMES:
+        raise ValueError("--init-from supports image models only")
+    if initialization:
+        # Weight origin describes the copied artifact, not a new optimization choice.
+        pretrained = source_config.get("pretrained")
+        if not isinstance(pretrained, bool):
+            raise ValueError("Initialization checkpoint has no valid pretrained weight origin")
+        if getattr(args, "pretrained", None) is not None and args.pretrained != pretrained:
+            raise ValueError("Cannot change --pretrained/--no-pretrained when using --init-from")
+        args.pretrained = pretrained
+    # Warm starts intentionally use new-run defaults and a fresh random seed.
+    # Only --resume restores the source run's optimization settings and history.
     config = resolve_settings(args, previous)
     device = resolve_device(args.device or (previous or {}).get("device", "cuda"))
     print(f"Preparing {args.model} data and model on {device}...", flush=True)
@@ -235,14 +274,14 @@ def train(args):
     split_path = Path(args.split).expanduser().resolve()
     records = load_annotations(annotations_path)
     manifest = read_manifest(split_path, annotations_path, records)
-    if checkpoint:
-        validate_checkpoint_data(previous, args.model, annotations_path, split_path, manifest)
-    images_dir = args.images_dir or (previous or {}).get("images_dir")
+    if source_config:
+        validate_checkpoint_data(source_config, args.model, annotations_path, split_path, manifest)
+    images_dir = args.images_dir or (source_config or {}).get("images_dir")
     if args.model in IMAGE_MODEL_NAMES and not images_dir:
         raise ValueError("--images-dir is required for image models")
     images_dir = str(Path(images_dir).expanduser().resolve()) if images_dir else None
-    if checkpoint and images_dir != previous.get("images_dir"):
-        raise ValueError("Cannot change the image directory while resuming")
+    if source_config and images_dir != source_config.get("images_dir"):
+        raise ValueError("Cannot change the image directory when resuming or using --init-from")
     config.update({"schema_version": 1, "model": args.model,
                    "model_config": configured_architecture(args.model, len(manifest["class_names"]), config),
                    "annotations": str(annotations_path), "split": str(split_path),
@@ -254,6 +293,11 @@ def train(args):
                    "evaluation_scope": manifest.get("evaluation_scope", "Held-out recording groups."),
                    "class_names": manifest["class_names"], "label_map": manifest["label_map"],
                    "images_dir": images_dir, "device": str(device), "run_dir": str(run_dir)})
+    if initialization:
+        validate_initialization_architecture(source_config["model_config"], config["model_config"])
+        config["initialized_from"] = {"checkpoint": str(init_from),
+                                      "checkpoint_sha256": initialization_sha256,
+                                      "source_epoch": initialization["epoch"]}
     start_epoch = checkpoint["epoch"] if checkpoint else 0
     if config["epochs"] <= start_epoch:
         raise ValueError(f"--epochs is the total target; choose a value above {start_epoch}")
@@ -277,7 +321,8 @@ def train(args):
                                     generator=generators[part])
     del records, selected_records
     model = build_model(config["model_config"],
-                        pretrained=config["pretrained"] and checkpoint is None).to(device)
+                        pretrained=config["pretrained"] and checkpoint is None
+                        and initialization is None).to(device)
     if args.model in IMAGE_MODEL_NAMES:
         trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
         total = sum(parameter.numel() for parameter in model.parameters())
@@ -293,6 +338,8 @@ def train(args):
         best_macro_f1 = checkpoint["best_macro_f1"]
         restore_random_state(checkpoint["random_state"], generators)
     else:
+        if initialization:
+            model.load_state_dict(initialization["model_state"], strict=True)
         run_dir.mkdir(parents=True, exist_ok=False)
     # Keep the original module for optimizer ownership and portable state dicts.
     # The execution wrapper compiles the complete model, including its classifier.
@@ -303,7 +350,8 @@ def train(args):
         f"config_resume_epoch{start_epoch}_"
         f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.json")
     write_json(run_dir / event_file, {"config": config, "provenance": provenance(torch, device),
-                                     "resumed_from": str(args.resume) if checkpoint else None})
+                                     "resumed_from": str(args.resume) if checkpoint else None,
+                                     "initialized_from": config.get("initialized_from")})
     metrics_path = run_dir / "diagnostics" / "metrics.jsonl"
     print("Best checkpoint selection: pooled validation macro F1.", flush=True)
     if checkpoint and metrics_path.exists():

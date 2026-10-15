@@ -62,7 +62,9 @@ Fresh runs select `--model pose`, `pose-wide`, `pose-attention`, `image`, or
 All three pose models update every parameter from random initialization and use
 the same pose loader and athlete-swap augmentation. Image runs train a randomly
 initialized 10-class head on a frozen pretrained ResNet-18 by default.
-`--image-training head` keeps that default. `--image-training layer4` trains the
+`--image-training head` keeps that default. `--image-training input-head` trains
+the first convolution and classifier (14,538 parameters), keeping all other
+weights and every BatchNorm statistic frozen. `--image-training layer4` trains the
 last residual stage and classifier while freezing the initial convolution and
 stages 1–3, including their BatchNorm statistics. `--image-training full` updates
 all backbone parameters. The classifier always trains; BatchNorm in trainable
@@ -75,11 +77,14 @@ rejects combining these aliases with `--image-training`. Image training modes
 are rejected for pose models. Old head/full checkpoints restore their original
 mode when the explicit `image_training` field is absent.
 
-DINOv3 runs (`image-dinov3`) instead use the official pretrained ViT-B/16 with
-all backbone weights frozen. Only a new 768-to-10 linear head trains, with 7,690
-trainable parameters. The backbone remains in evaluation mode during head
-training. Only `--image-training head` is supported; `layer4`, `full`, and
-`--fine-tune` are rejected. It shares the ResNet image loader, letterboxing,
+DINOv3 runs (`image-dinov3`) use the official pretrained ViT-B/16. The default
+`head` mode freezes all backbone weights and trains a new 768-to-10 linear head
+(7,690 parameters). `input-head` also trains the patch projection, for 598,282
+trainable parameters. All transformer blocks and special tokens remain frozen.
+The backbone stays in evaluation mode in both scopes. Input-head training
+retains autograd through the frozen blocks to update the input projection;
+this needs more memory and computation than head-only training. `layer4`,
+`full`, and `--fine-tune` are rejected. It shares the ResNet image loader, letterboxing,
 normalization, sample population and augmentation. This preprocessing preserves
 the complete frame and deliberately differs from the official processor's direct resize.
 
@@ -132,7 +137,20 @@ adds a comparison CSV and a manifest, and does not read checkpoints or evaluate
 models. See the root README for the archive contents and the limits of snapshots
 taken during active training.
 
-`--resume <run>/checkpoints/last.pt` resumes that exact run. Omitted settings use
+`--init-from <source-run>/checkpoints/best.pt` (or `last.pt`) starts a new image
+run from a trusted project checkpoint's complete model weights. It requires a
+new `--run-dir`, resets optimizer/epoch/RNG/best score, and can change the image
+training scope and classifier dropout. Omitted model/data paths come from the
+source; annotation and split hashes, classes, architecture/preprocessing and
+image directory must match. Other training settings use fresh-run defaults,
+not the source values. The pretrained-weight origin is inherited from the source;
+conflicting `--pretrained` / `--no-pretrained` flags are rejected. Source path,
+epoch and SHA-256 identify the initialization.
+The source run is unchanged. Loading these weights requires no pretrained download.
+This supports staged image training; pose models do not support `--init-from`.
+
+`--resume <run>/checkpoints/last.pt` resumes that exact run and is mutually
+exclusive with `--init-from`. Omitted settings use
 the checkpoint values. Explicit changes to seed, batch size, learning rate, weight decay,
 workers, pretrained/image-training/fine-tune/swap settings, or any attention architecture setting
 are rejected, as are changes to dropout or horizontal-mirror probability. Both

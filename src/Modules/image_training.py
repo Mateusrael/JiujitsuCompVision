@@ -1,6 +1,6 @@
 """Image training modes, shared by CLI and model construction without importing Torch."""
 
-IMAGE_TRAINING_MODES = ("head", "layer4", "full")
+IMAGE_TRAINING_MODES = ("head", "input-head", "layer4", "full")
 
 
 def resolve_image_training(image_training=None, fine_tune=None):
