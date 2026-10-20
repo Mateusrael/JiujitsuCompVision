@@ -475,6 +475,172 @@ def build_chart_data(source_path, *, models=MODELS, split_sha256=None, annotatio
         source.close()
 
 
+def presentation_epoch_axis(first, last):
+    """Choose numeric epoch ticks, keeping real endpoints and round interior ticks."""
+    if first < 0 or last < first:
+        raise ValueError("Epoch bounds must be nonnegative and ordered")
+    if first == last:
+        return (max(0, first - .5), last + .5), [first]
+    if first == 1 and last == 20:
+        return (0, 20), [0, 5, 10, 15, 20]
+    target = (last - first) / 5
+    scale = 10 ** math.floor(math.log10(max(1, target)))
+    step = max(1, min((factor * scale for factor in (1, 2, 5, 10)),
+                      key=lambda value: abs(math.log(value / max(1, target)))))
+    interior = list(range(math.ceil(first / step) * step, last + 1, step))
+    # Keep the true endpoints, omitting a nearby round tick rather than crowding
+    # two labels. Plot coordinates are always the logged epoch values.
+    spacing = (last - first) * .065
+    ticks = [first, *(tick for tick in interior
+                      if tick - first >= spacing and last - tick >= spacing), last]
+    return (first, last), list(dict.fromkeys(ticks))
+
+
+def presentation_curve_figure(model):
+    """A fixed-size slide image with numeric X axes and no model/hparam heading."""
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FixedLocator, MultipleLocator, PercentFormatter
+
+    windows = model.get("curve_windows") or [
+        {"epochs": model["epochs"], "curve_y_axes": model["curve_y_axes"],
+         "first_epoch": model["epochs"][0]["epoch"],
+         "last_epoch": model["epochs"][-1]["epoch"]}]
+    colors = {"train": "#17324D", "val": "#DC722A", "f1": "#00877F"}
+    series = (
+        (("train_loss", "Train loss", colors["train"]),
+         ("val_loss", "Val loss", colors["val"])),
+        (("train_accuracy", "Train acc.", colors["train"]),
+         ("val_accuracy", "Val acc.", colors["val"]),
+         ("val_macro_f1", "Val macro F1", colors["f1"])),
+    )
+    style = {"font.family": "DejaVu Sans", "font.size": 11.5,
+             "axes.spines.top": False, "axes.spines.right": False,
+             "axes.spines.left": False, "axes.spines.bottom": False,
+             "text.color": "#17324D", "axes.labelcolor": "#43566A",
+             "xtick.color": "#43566A", "ytick.color": "#43566A",
+             "svg.fonttype": "none"}
+    with plt.rc_context(style):
+        fig, axes = plt.subplots(len(windows), 2, figsize=(11.52, 4.5),
+                                 dpi=200, squeeze=False, facecolor="#F6F8FA")
+        fig.subplots_adjust(left=.065, right=.987, bottom=.16, top=.865,
+                            wspace=.22, hspace=.77 if len(windows) > 1 else .3)
+        for column, heading in enumerate(("Loss", "Accuracy e macro F1")):
+            fig.text(axes[0, column].get_position().x0, .97, heading,
+                     fontsize=14, weight="bold", ha="left", va="top")
+        for row_index, window in enumerate(windows):
+            rows = window["epochs"]
+            xs = [row["epoch"] for row in rows]
+            limits, ticks = presentation_epoch_axis(xs[0], xs[-1])
+            for column, name in enumerate(("loss", "metrics")):
+                ax = axes[row_index, column]
+                ax.set_facecolor("#F6F8FA")
+                ax.set_title(f"Épocas {xs[0]}–{xs[-1]}", loc="left", fontsize=10.8,
+                             weight="normal", pad=8, color="#43566A")
+                for key, label, color in series[column]:
+                    ax.plot(xs, [row[key] for row in rows], color=color, linewidth=1.4,
+                            label=label, marker="o" if len(rows) == 1 else None,
+                            markersize=3)
+                ax.set_xlim(*limits)
+                ax.xaxis.set_major_locator(FixedLocator(ticks))
+                bounds = window["curve_y_axes"][name]
+                ax.set_ylim(bounds["min"], bounds["max"])
+                major_unit = bounds["major_unit"]
+                while (bounds["max"] - bounds["min"]) / major_unit > 5.0000001:
+                    major_unit *= 2
+                ax.yaxis.set_major_locator(MultipleLocator(major_unit))
+                if name == "metrics":
+                    ax.yaxis.set_major_formatter(PercentFormatter(
+                        1, decimals=1 if bounds["max"] - bounds["min"] < .15 else 0))
+                ax.grid(axis="y", color="#D0D8DF", linewidth=.7)
+                ax.set_axisbelow(True)
+                ax.tick_params(axis="both", length=0, pad=5, labelsize=10.5)
+                if row_index == len(windows) - 1:
+                    ax.set_xlabel("Época", labelpad=4, fontsize=10.5)
+        for column in range(2):
+            handles, labels = axes[-1, column].get_legend_handles_labels()
+            bounds = axes[-1, column].get_position()
+            fig.legend(handles, labels, loc="lower center",
+                       bbox_to_anchor=((bounds.x0 + bounds.x1) / 2, .006),
+                       ncol=len(handles), frameon=False, fontsize=10.2,
+                       handlelength=1.4, columnspacing=1.1, handletextpad=.4)
+    return fig
+
+
+def presentation_recall_figure(models):
+    """Compact per-class blocks for a 1152 by 500 slide area."""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgb
+
+    names = [row["class_name"] for row in models[0]["class_recall_blocks"]["rows"]]
+    if any([row["class_name"] for row in model["class_recall_blocks"]["rows"]] != names
+           for model in models[1:]):
+        raise ValueError("Cannot combine recall blocks with different class names or class order")
+    with plt.rc_context({"font.family": "DejaVu Sans", "svg.fonttype": "none",
+                         "text.color": "#17324D", "xtick.color": "#43566A",
+                         "ytick.color": "#43566A"}):
+        fig, axes = plt.subplots(1, len(models), figsize=(11.52, 5), dpi=200,
+                                 squeeze=False, facecolor="#F6F8FA")
+        fig.subplots_adjust(left=.145, right=.993, top=.865, bottom=.12, wspace=.07)
+        for index, (ax, model) in enumerate(zip(axes[0], models)):
+            block = model["class_recall_blocks"]
+            ax.imshow([[to_rgb(cell["fill"]) for cell in row["cells"]]
+                       for row in block["rows"]], aspect="auto")
+            ax.set_title(f"{model['display_name']} · época {model['selected_epoch']}",
+                         pad=37, fontsize=12.5, weight="bold")
+            ax.set_xticks(range(3), ["Overall", "Held-out\nview", "Unseen\nmoment"],
+                          fontsize=10.2)
+            ax.xaxis.tick_top()
+            ax.set_yticks(range(len(names)), [name.replace("_", " ") for name in names]
+                          if index == 0 else [""] * len(names), fontsize=11)
+            ax.tick_params(axis="both", length=0, pad=7)
+            ax.set_xticks([value - .5 for value in range(4)], minor=True)
+            ax.set_yticks([value - .5 for value in range(len(names) + 1)], minor=True)
+            ax.grid(which="minor", color="#F6F8FA", linewidth=1.4)
+            ax.tick_params(which="minor", length=0)
+            for row_index, row in enumerate(block["rows"]):
+                for column, cell in enumerate(row["cells"]):
+                    ax.text(column, row_index, cell["label"], ha="center", va="center",
+                            fontsize=9.5 if len(models) == 3 else 11, color=cell["text"],
+                            linespacing=1.15)
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+        fig.text(.145, .025, "Cada célula: acertos / total e recall (%) · N/A = sem amostras",
+                 fontsize=10.5, color="#43566A")
+    return fig
+
+
+def render_presentation_curves(data, output):
+    """Export slide-ready PNG/SVG curves and class blocks without native charts."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output = Path(output)
+
+    def save(fig, name, files, directory=output):
+        directory.mkdir(parents=True, exist_ok=True)
+        paths = {}
+        for extension in ("png", "svg"):
+            path = directory / f"{name}.{extension}"
+            # Fixed canvas dimensions make insertion predictable; tight cropping
+            # changes the aspect ratio and can alter the slide's text sizes.
+            fig.savefig(path, dpi=200, facecolor="#F6F8FA",
+                        metadata={"Date": None} if extension == "svg" else {})
+            paths[extension] = path.relative_to(output).as_posix()
+        files[name] = paths
+        plt.close(fig)
+
+    for model in data["models"]:
+        save(presentation_curve_figure(model), "presentation_curves", model["files"],
+             output / model["model"])
+    for family, model_names in (("image", {"image", "image-dinov3"}),
+                                ("pose", set(POSE_MODELS))):
+        models = [model for model in data["models"] if model["model"] in model_names]
+        if models:
+            save(presentation_recall_figure(models), f"presentation_recall_{family}",
+                 data.setdefault("files", {}))
+
+
 def render_figures(data, output):
     try:
         import matplotlib
@@ -700,6 +866,7 @@ def render_figures(data, output):
             destination = {"model": "", "files": {}}
             save(recall_plot(models), destination, f"class_recall_{family}")
             data.setdefault("files", {}).update(destination["files"])
+    render_presentation_curves(data, output)
 
 
 def main(argv=None):

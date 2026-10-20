@@ -1,7 +1,9 @@
 """Tests for validation-only selection, provenance, and class alignment."""
 
+import importlib.util
 import json
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -342,6 +344,48 @@ class PlotTrainingMetricsTests(unittest.TestCase):
         model = self.data()["models"][0]
         self.assertEqual(len(model["epochs"]), 1)
         self.assertIn("Unterminated metrics line", model["warnings"][0])
+
+    def test_presentation_epoch_ticks_are_numeric_with_round_interior_values(self):
+        self.assertEqual(plots.presentation_epoch_axis(1, 20),
+                         ((0, 20), [0, 5, 10, 15, 20]))
+        self.assertEqual(plots.presentation_epoch_axis(21, 300),
+                         ((21, 300), [21, 50, 100, 150, 200, 250, 300]))
+        self.assertEqual(plots.presentation_epoch_axis(1, 30),
+                         ((1, 30), [1, 5, 10, 15, 20, 25, 30]))
+        self.assertEqual(plots.presentation_epoch_axis(42, 42), ((41.5, 42.5), [42]))
+
+    @unittest.skipUnless(importlib.util.find_spec("matplotlib"), "Optional matplotlib dependency")
+    def test_presentation_figures_keep_logged_epoch_coordinates_and_fixed_canvas(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        self.run_fixture("pose", [.7] * 25)
+        self.run_fixture("dino", [.8] * 30, model="image-dinov3")
+        data = plots.build_chart_data(self.trainings, models=("pose", "image-dinov3"))
+        pose, dino = data["models"]
+        # Deliberately introduce a missing epoch: a category axis would compress
+        # this gap or invent a value, while a numeric plot must preserve it.
+        pose["curve_windows"][1]["epochs"][1]["epoch"] = 22.5
+        for model, expected in ((pose, [list(range(1, 21)), [21, 22.5, 23, 24, 25]]),
+                                (dino, [list(range(1, 31))])):
+            fig = plots.presentation_curve_figure(model)
+            try:
+                self.assertEqual(len(fig.axes), len(expected) * 2)
+                for index, ax in enumerate(fig.axes):
+                    for line in ax.lines:
+                        self.assertEqual(list(line.get_xdata()), expected[index // 2])
+                    self.assertEqual(ax.get_xlim()[1], expected[index // 2][-1])
+                    self.assertTrue(all(tick % 1 == 0 for tick in ax.get_xticks()))
+            finally:
+                plt.close(fig)
+        plots.render_presentation_curves(data, self.root / "figures")
+        for model in data["models"]:
+            path = self.root / "figures" / model["files"]["presentation_curves"]["png"]
+            self.assertEqual(struct.unpack(">II", path.read_bytes()[16:24]), (2304, 900))
+        for family in ("pose", "image"):
+            path = self.root / "figures" / data["files"][f"presentation_recall_{family}"]["png"]
+            self.assertEqual(struct.unpack(">II", path.read_bytes()[16:24]), (2304, 1000))
 
 
 if __name__ == "__main__":
