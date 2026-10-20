@@ -1,0 +1,2 @@
+# Optional offline metrics analysis; no GPU/training libraries required.
+matplotlib>=3.8,<4

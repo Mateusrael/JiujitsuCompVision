@@ -12,7 +12,10 @@ class BundleTests(unittest.TestCase):
             root = Path(directory)
             for name in ("src/Scripts/train.py", "README.md", "Data/annotations.json",
                          "trainings/run/model.pt", "launchers/local_config.sh", "launchers/queue.local.json", ".env",
-                         "src/__pycache__/module.pyc", "launchers/START_TRAINING.sh"):
+                         "src/__pycache__/module.pyc", "launchers/START_TRAINING.sh",
+                         "notebooks/model_explorer.ipynb",
+                         "notebooks/.ipynb_checkpoints/model_explorer-checkpoint.ipynb",
+                         "output/other-results/data.json"):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"example\r\n")
@@ -21,7 +24,7 @@ class BundleTests(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 self.assertEqual(set(archive.namelist()), {
                     "src/Scripts/train.py", "README.md", "launchers/START_TRAINING.sh",
-                    "source_manifest.json"})
+                    "notebooks/model_explorer.ipynb", "source_manifest.json"})
                 self.assertNotIn(b"\r", archive.read("launchers/START_TRAINING.sh"))
             with self.assertRaises(FileExistsError):
                 build_bundle(root, output)

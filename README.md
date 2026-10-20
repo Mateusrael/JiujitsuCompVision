@@ -14,6 +14,15 @@ It runs up to six trainings at once from one terminal, selects a GPU at each
 launch using current memory/utilization, and keeps a separate attachable tqdm
 log for every job. The manager continues in the background when a viewer closes.
 
+Use the [training figure generator](docs/plot_training_metrics.md) to reproduce
+loss curves, validation metrics, and per-class comparisons from saved run data.
+It exports PNG/SVG figures and the source data for editable charts.
+
+Open the [model explorer notebook](notebooks/model_explorer.ipynb)
+in JupyterLab to browse curves, inspect class metrics, and predict random
+samples with image/pose overlays. See the [notebook setup](docs/model_explorer.md)
+for the project kernel and controls.
+
 ```text
 install/        environment probe and Linux dependency setup
 launchers/      editable paths and commands to run common operations
@@ -26,6 +35,7 @@ src/
   Scripts/      command-line entry points and upload bundle creation
 tests/          small checks using synthetic data
 docs/           versioned multiview section plan and recording-map template
+notebooks/      interactive model exploration notebooks
 Data/           remote dataset and split manifests (ignored by Git)
 trainings/      per-run config, checkpoints and diagnostics (ignored)
 diagnostics/    environment and dataset reports (ignored)

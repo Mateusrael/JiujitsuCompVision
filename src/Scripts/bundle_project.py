@@ -12,8 +12,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOT_FILES = {"README.md", ".gitignore", ".gitattributes", "bootstrap.sh"}
-SOURCE_DIRS = {"install", "launchers", "src", "tests", "docs"}
-SOURCE_SUFFIXES = {".py", ".sh", ".md", ".json", ".txt"}
+SOURCE_DIRS = {"install", "launchers", "src", "tests", "docs", "notebooks"}
+SOURCE_SUFFIXES = {".py", ".sh", ".md", ".json", ".txt", ".ipynb"}
 
 
 def source_files(root):

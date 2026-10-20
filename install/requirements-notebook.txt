@@ -1,0 +1,4 @@
+# Install into the project venv; the existing JupyterLab server can stay as it is.
+-r requirements-analysis.txt
+ipykernel>=6.29,<8
+ipywidgets>=8.1,<9
