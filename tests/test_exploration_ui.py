@@ -1,6 +1,7 @@
 """Opt-in notebook controls exercised against small local checkpoint fixtures."""
 
 import contextlib
+import base64
 import io
 import json
 import os
@@ -72,7 +73,10 @@ class ExplorationUITests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             predictor.sample()
-        self.assertIn("selection changed", output.getvalue())
+        self.assertIn("selection changed", predictor.output.outputs[0]["text"])
+        self.assertEqual(predictor.records, [])
+        self.assertEqual(predictor.sample_id.options, ())
+        self.assertEqual(predictor.input_output.outputs, ())
         predictor.set_data(self.data)
         self.assertIsNone(predictor.session)
         self.assertIsNone(predictor.loaded_selection)
@@ -103,6 +107,58 @@ class ExplorationUITests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             predictor.sample(exact=True)
         self.assertEqual([r["image"] for r in predictor.records], ["0100003"])
+
+    def test_prediction_callbacks_publish_complete_pngs_and_replace_old_results(self):
+        from PIL import Image, ImageStat
+        import matplotlib.pyplot as plt
+        _, predictor = self.browsers()
+        predictor.load_button.click()
+        # Exercise the actual callbacks without an IPython display-capture context.
+        predictor.count.value = 3
+        predictor.fixed_seed.value = True
+        for exact in (False, True, False):
+            if exact:
+                predictor.image_id.value = "0100003"
+                predictor.exact_button.click()
+            else:
+                predictor.sample_button.click()
+            images = [o["data"]["image/png"] for o in predictor.output.outputs
+                      if o["output_type"] == "display_data"]
+            self.assertEqual(len(images), 1)
+            with Image.open(io.BytesIO(base64.b64decode(images[0]))) as image:
+                expected = 1 if exact else 3
+                self.assertEqual(len(predictor.records), expected)
+                self.assertGreater(image.width, 1000)
+                self.assertGreater(image.height, expected * 300)
+                # Each sample row contains visible content, including the bottom row.
+                for row in range(expected):
+                    band = image.crop((0, row * image.height // expected,
+                                       image.width, (row + 1) * image.height // expected))
+                    self.assertGreater(max(ImageStat.Stat(band.convert("RGB")).stddev), 20)
+            self.assertEqual(plt.get_fignums(), [])
+        predictor.input_button.click()
+        self.assertTrue(any(o["output_type"] == "display_data" for o in predictor.input_output.outputs))
+        from unittest.mock import patch
+        with patch("src.Eval.exploration_ui.plot_model_input", side_effect=FileNotFoundError("missing frame")):
+            predictor.input_button.click()
+        self.assertIsNone(predictor.last_input_tensor)
+        self.assertIn("missing frame", predictor.input_output.outputs[0]["text"])
+        predictor.image_id.value = "not-an-image"
+        predictor.exact_button.click()
+        self.assertIn("absent", predictor.output.outputs[0]["text"])
+        self.assertEqual(predictor.records, [])
+        self.assertEqual(predictor.input_output.outputs, ())
+
+    def test_png_renderer_closes_figure_even_when_encoding_fails(self):
+        import matplotlib.pyplot as plt
+        import ipywidgets as widgets
+        from unittest.mock import patch
+        from src.Eval.exploration_ui import _show_figure
+        figure = plt.figure()
+        with patch.object(figure, "savefig", side_effect=OSError("render failed")):
+            with self.assertRaisesRegex(OSError, "render failed"):
+                _show_figure(widgets.Output(), figure)
+        self.assertEqual(plt.get_fignums(), [])
 
 
 if __name__ == "__main__":

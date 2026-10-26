@@ -1,5 +1,7 @@
 """Optional Jupyter controls over saved metrics and checkpoint inference."""
 
+import base64
+from io import BytesIO
 import json
 from pathlib import Path
 
@@ -13,6 +15,30 @@ def _notebook_dependencies():
     except ImportError as error:
         raise ImportError("Install install/requirements-notebook.txt in this kernel's environment") from error
     return widgets, clear_output, display
+
+
+def _new_output(widgets):
+    """Allow figures to grow inside a VBox without clipping tall sample batches."""
+    return widgets.Output(layout=widgets.Layout(
+        width="100%", height="auto", max_height="none", overflow="visible", flex="0 0 auto"))
+
+
+def _set_output_text(output, text):
+    """Replace output directly, independent of callback message capture."""
+    output.outputs = ({"output_type": "stream", "name": "stdout", "text": text.rstrip() + "\n"},)
+
+
+def _show_figure(output, fig):
+    """Publish a complete PNG before closing the figure, on any notebook backend."""
+    import matplotlib.pyplot as plt
+    try:
+        with BytesIO() as buffer:
+            fig.savefig(buffer, format="png", dpi=100, bbox_inches="tight", facecolor=fig.get_facecolor())
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        output.outputs += ({"output_type": "display_data", "data": {
+            "image/png": encoded, "text/plain": "<Model exploration figure>"}, "metadata": {}},)
+    finally:
+        plt.close(fig)
 
 
 class RunBrowser:
@@ -224,7 +250,7 @@ class PredictionBrowser:
         self.exact_button = widgets.Button(description="Predict this image")
         self.sample_id = widgets.Dropdown(options=[], description="Inspect:")
         self.input_button = widgets.Button(description="Show model input")
-        self.status, self.output, self.input_output = widgets.Output(), widgets.Output(), widgets.Output()
+        self.status, self.output, self.input_output = (_new_output(widgets) for _ in range(3))
         self.widget = widgets.VBox([
             widgets.HTML("<b>Uses the run selected in the metrics browser.</b>"),
             widgets.HBox([self.checkpoint, self.device, self.load_button, self.unload_button]),
@@ -237,7 +263,7 @@ class PredictionBrowser:
             widgets.HBox([self.image_id, self.exact_button]),
             self.output,
             widgets.HBox([self.sample_id, self.input_button]), self.input_output,
-        ])
+        ], layout=widgets.Layout(width="100%", height="auto", overflow="visible"))
         self.load_button.on_click(lambda _: self.load())
         self.unload_button.on_click(lambda _: self.close())
         self.sample_button.on_click(lambda _: self.sample())
@@ -266,97 +292,100 @@ class PredictionBrowser:
             self.session = None
         self.loaded_selection = None
         self.records, self.predictions = [], []
+        self.last_input_tensor = None
         self.sample_id.options = []
         for output in (self.status, self.output, self.input_output):
-            with output:
-                self._clear(wait=False)
+            output.outputs = ()
 
     def load(self):
         from src.Eval.exploration import ModelExplorer
         self.close()
-        with self.status:
-            try:
-                name = self.run_browser.run_name.value
-                if not name:
-                    raise ValueError("Select a run in the metrics browser first")
-                self.session = ModelExplorer.from_run(
-                    self.run_browser.trainings_dir / name, self.data,
-                    checkpoint=self.checkpoint.value, device=self.device.value.strip())
-                self.loaded_selection = (name, self.checkpoint.value, self.device.value.strip())
-                total = sum(p.numel() for p in self.session.model.parameters())
-                print(f"Loaded {name}\n{self.session.model_name}, checkpoint epoch "
-                      f"{self.session.checkpoint_epoch}, {total:,} parameters, {self.device.value}.")
-                print("Eval mode; augmentation disabled. Softmax scores are not calibrated confidence.")
-            except (OSError, ValueError, RuntimeError, ImportError) as error:
-                print(f"{type(error).__name__}: {error}")
+        _set_output_text(self.status, "Loading selected checkpoint…")
+        try:
+            name = self.run_browser.run_name.value
+            if not name:
+                raise ValueError("Select a run in the metrics browser first")
+            self.session = ModelExplorer.from_run(
+                self.run_browser.trainings_dir / name, self.data,
+                checkpoint=self.checkpoint.value, device=self.device.value.strip())
+            self.loaded_selection = (name, self.checkpoint.value, self.device.value.strip())
+            total = sum(p.numel() for p in self.session.model.parameters())
+            _set_output_text(self.status,
+                f"Loaded {name}\n{self.session.model_name}, checkpoint epoch "
+                f"{self.session.checkpoint_epoch}, {total:,} parameters, {self.device.value}.\n"
+                "Eval mode; augmentation disabled. Softmax scores are not calibrated confidence.")
+        except (OSError, ValueError, RuntimeError, ImportError) as error:
+            _set_output_text(self.status, f"{type(error).__name__}: {error}")
 
     def sample(self, *, exact=False):
-        import matplotlib.pyplot as plt
-        with self.output:
-            self._clear(wait=True)
-            try:
-                if self.session is None:
-                    raise ValueError("Load a checkpoint first")
-                selected = (self.run_browser.run_name.value, self.checkpoint.value,
-                            self.device.value.strip())
-                if selected != self.loaded_selection:
-                    raise ValueError("Run, checkpoint, or device selection changed. Click Load selected run.")
-                frame_max = self.frame_max.value if self.frame_max.value >= 0 else None
-                filters = dict(split=self.split.value, class_name=self.class_name.value,
-                               source=self.source.value, evaluation_type=self.cohort.value,
-                               frame_range=(self.frame_min.value, frame_max))
-                if exact:
-                    candidates = self.data.select(self.session.model_name, **filters)
-                    records = [r for r in candidates if r["image"] == self.image_id.value.strip()]
-                    if not records:
-                        raise ValueError("That image is absent or outside the current eligible filters")
-                else:
-                    count = self.count.value if self.result_filter.value == "Any" else max(
-                        self.pool_size.value, self.count.value)
-                    records = self.data.sample(self.session.model_name, count=count,
-                                               seed=self.seed.value if self.fixed_seed.value else None,
-                                               **filters)
-                predictions = self.session.predict(records, top_k=3, batch_size=16)
-                pairs = list(zip(records, predictions))
-                tested = len(pairs)
-                if not exact:
-                    if self.result_filter.value in ("Incorrect", "Correct"):
-                        correct = self.result_filter.value == "Correct"
-                        pairs = [(r, p) for r, p in pairs if p["correct"] == correct]
-                    elif self.result_filter.value == "Lowest confidence":
-                        pairs.sort(key=lambda item: max(item[1]["probabilities"]))
-                    pairs = pairs[:self.count.value]
-                print(f"{self.session.model_name}, checkpoint epoch {self.session.checkpoint_epoch}.")
-                print(f"Evaluated {tested} sampled images; showing {len(pairs)}. "
-                      "This sample is not a dataset-wide accuracy estimate.")
-                self.records = [r for r, _ in pairs]
-                self.predictions = [p for _, p in pairs]
-                self.sample_id.options = [r["image"] for r in self.records]
-                if self.records:
-                    self.sample_id.value = self.records[0]["image"]
-                if not pairs:
-                    print("No matching results in this random pool. Try another batch or a larger pool.")
-                    return
-                fig = plot_predictions(self.data, self.records, self.predictions,
-                                       overlay=self.overlay.value, min_confidence=self.confidence.value)
-                self._display(fig)
-                plt.close(fig)
-            except (OSError, ValueError, RuntimeError, KeyError) as error:
-                print(f"{type(error).__name__}: {error}")
+        self.records, self.predictions = [], []
+        self.sample_id.options = []
+        self.last_input_tensor = None
+        self.input_output.outputs = ()
+        _set_output_text(self.output, "Predicting selected samples…")
+        try:
+            if self.session is None:
+                raise ValueError("Load a checkpoint first")
+            selected = (self.run_browser.run_name.value, self.checkpoint.value,
+                        self.device.value.strip())
+            if selected != self.loaded_selection:
+                raise ValueError("Run, checkpoint, or device selection changed. Click Load selected run.")
+            frame_max = self.frame_max.value if self.frame_max.value >= 0 else None
+            filters = dict(split=self.split.value, class_name=self.class_name.value,
+                           source=self.source.value, evaluation_type=self.cohort.value,
+                           frame_range=(self.frame_min.value, frame_max))
+            if exact:
+                candidates = self.data.select(self.session.model_name, **filters)
+                records = [r for r in candidates if r["image"] == self.image_id.value.strip()]
+                if not records:
+                    raise ValueError("That image is absent or outside the current eligible filters")
+            else:
+                count = self.count.value if self.result_filter.value == "Any" else max(
+                    self.pool_size.value, self.count.value)
+                records = self.data.sample(self.session.model_name, count=count,
+                                           seed=self.seed.value if self.fixed_seed.value else None,
+                                           **filters)
+            predictions = self.session.predict(records, top_k=3, batch_size=16)
+            pairs = list(zip(records, predictions))
+            tested = len(pairs)
+            if not exact:
+                if self.result_filter.value in ("Incorrect", "Correct"):
+                    correct = self.result_filter.value == "Correct"
+                    pairs = [(r, p) for r, p in pairs if p["correct"] == correct]
+                elif self.result_filter.value == "Lowest confidence":
+                    pairs.sort(key=lambda item: max(item[1]["probabilities"]))
+                pairs = pairs[:self.count.value]
+            _set_output_text(self.output,
+                f"{self.session.model_name}, checkpoint epoch {self.session.checkpoint_epoch}.\n"
+                f"Evaluated {tested} images; showing {len(pairs)}. "
+                "This sample is not a dataset-wide accuracy estimate.")
+            self.records = [r for r, _ in pairs]
+            self.predictions = [p for _, p in pairs]
+            self.sample_id.options = [r["image"] for r in self.records]
+            if self.records:
+                self.sample_id.value = self.records[0]["image"]
+            if not pairs:
+                self.output.append_stdout(
+                    "No matching results in this random pool. Try another batch or a larger pool.\n")
+                return
+            fig = plot_predictions(self.data, self.records, self.predictions,
+                                   overlay=self.overlay.value, min_confidence=self.confidence.value)
+            _show_figure(self.output, fig)
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            _set_output_text(self.output, f"{type(error).__name__}: {error}")
 
     def show_input(self):
-        import matplotlib.pyplot as plt
-        with self.input_output:
-            self._clear(wait=True)
-            try:
-                if self.session is None or not self.sample_id.value:
-                    raise ValueError("Predict samples first")
-                record = next(r for r in self.records if r["image"] == self.sample_id.value)
-                fig, self.last_input_tensor = plot_model_input(self.session, record)
-                self._display(fig)
-                plt.close(fig)
-                print(f"Input tensor: {tuple(self.last_input_tensor.shape)}, {self.last_input_tensor.dtype}")
-                if self.session.model_name in POSE_MODEL_NAMES:
-                    print("The exact tensor is available as predictor.last_input_tensor.")
-            except (OSError, ValueError, RuntimeError, KeyError) as error:
-                print(f"{type(error).__name__}: {error}")
+        self.input_output.outputs = ()
+        self.last_input_tensor = None
+        try:
+            if self.session is None or not self.sample_id.value:
+                raise ValueError("Predict samples first")
+            record = next(r for r in self.records if r["image"] == self.sample_id.value)
+            fig, self.last_input_tensor = plot_model_input(self.session, record)
+            _show_figure(self.input_output, fig)
+            self.input_output.append_stdout(
+                f"Input tensor: {tuple(self.last_input_tensor.shape)}, {self.last_input_tensor.dtype}\n")
+            if self.session.model_name in POSE_MODEL_NAMES:
+                self.input_output.append_stdout("The exact tensor is available as predictor.last_input_tensor.\n")
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            _set_output_text(self.input_output, f"{type(error).__name__}: {error}")

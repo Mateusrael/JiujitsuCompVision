@@ -34,9 +34,11 @@ Pose curves show the first 20 logged epochs separately by default. Change
 Class figures default to the checkpoint selected by pooled validation macro
 F1. Enter `last` or a logged epoch number to inspect another epoch.
 
-The notebook also includes a code cell for comparing selected runs. Comparisons
-require matching annotation and split hashes; image and pose models can still
-have different eligible populations.
+In **Compare selected runs**, use the model/run selectors and **Add run** to
+build a comparison list. Model and name filters do not discard added runs.
+Remove entries or clear the list as needed, choose a metric, then click
+**Compare runs**. Comparisons require matching annotation and split hashes;
+image and pose models can still have different eligible populations.
 
 ## Inspect predictions
 
@@ -63,6 +65,21 @@ inspection of test examples should not guide model selection.
   sample: normalized joint features or the letterboxed image.
 - Pose overlay confidence changes only the visualization, never model inputs.
 
+Prediction figures are sent as complete PNG images, with output height allowed
+to grow for multiple samples. Every new request replaces the previous results
+and clears the old input preview; empty selections and errors appear as text.
+
+**Compare predictions on the same frames** has its own model/run selectors and
+comparison list. Choose the partition, evaluation group, sample count, seed,
+checkpoint and device, then click **Compare predictions**. A comparison with
+any pose model uses the shared pose-eligible population; an image-only comparison
+uses the image population. Every run receives exactly the same selected IDs.
+The single-run model is unloaded first, and comparison checkpoints are loaded
+one at a time and released after inference, including when inference fails.
+
+After updating notebook code, restart the kernel and run the cells from the top
+to replace already-imported code and existing widget callbacks.
+
 Pose inference retains the project's two-athlete and paired-view eligibility
 rules in every partition. Augmentation and dropout are disabled for inference.
 Full project checkpoints include the image backbones, so loading them does not
@@ -71,8 +88,9 @@ Softmax scores are displayed as model scores, not calibrated probabilities.
 Use this notebook with checkpoints produced by this project that you trust.
 
 The reusable interfaces live in `src.Eval.exploration`,
-`src.Eval.exploration_plots`, and `src.Eval.exploration_ui`; they can also be
-called directly from code cells. Clear notebook outputs before committing
+`src.Eval.exploration_plots`, `src.Eval.exploration_ui`, and
+`src.Eval.exploration_compare_ui`; they can also be called directly from code
+cells. Clear notebook outputs before committing
 executed copies.
 
 If this JupyterLab server cannot display widgets, the same operations work
