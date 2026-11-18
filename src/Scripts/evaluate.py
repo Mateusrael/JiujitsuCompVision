@@ -19,7 +19,7 @@ def build_parser():
     parser.add_argument("--output", help="Default: <run>/diagnostics/test_metrics.json")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--workers", type=int)
-    parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    parser.add_argument("--device", choices=("cuda", "mps", "cpu"), default="cuda")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False,
                         help="Compile the whole model for evaluation; default: disabled")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default",

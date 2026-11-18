@@ -31,8 +31,8 @@ def build_parser():
                         help="AdamW weight decay; finite and nonnegative; fresh default: 0.0001")
     parser.add_argument("--workers", type=int, help="DataLoader workers; fresh default: 2")
     parser.add_argument("--seed", type=int, help="Fresh default: 42; preserved on resume")
-    parser.add_argument("--device", choices=("cuda", "cpu"),
-                        help="Fresh default: cuda; use cpu explicitly for small tests")
+    parser.add_argument("--device", choices=("cuda", "mps", "cpu"),
+                        help="Fresh default: cuda; use mps on Apple Silicon or cpu for small tests")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None,
                         help="Compile the whole model with torch.compile; fresh default: disabled")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES,
@@ -49,6 +49,17 @@ def build_parser():
                                 help="Legacy ResNet alias: --fine-tune selects full training; --no-fine-tune selects head")
     parser.add_argument("--swap-athletes", action=argparse.BooleanOptionalAction, default=None,
                         help="Randomly swap pose slots during training (default: enabled for 10 classes)")
+    parser.add_argument("--pose-joint-noise", type=float,
+                        help="Training pose models: x/y noise std over the pair scale; fresh default: 0")
+    parser.add_argument("--pose-joint-dropout", type=float,
+                        help="Training pose models: probability of removing each joint; fresh default: 0")
+    parser.add_argument("--pose-athlete-dropout", type=float,
+                        help="Training pose models: probability of removing one athlete; fresh default: 0")
+    parser.add_argument("--pose-detections",
+                        help="Training pose models: JSONL of detected poses replacing the annotated "
+                             "ones in the train split; validation stays annotated")
+    parser.add_argument("--pose-keep-annotated", action="store_true", default=None,
+                        help="With --pose-detections: train on annotated and detected poses together")
     parser.add_argument("--horizontal-flip-prob", type=float,
                         help="Training-only horizontal mirror probability for poses/images; default: 0 (off)")
     parser.add_argument("--dropout", type=float,

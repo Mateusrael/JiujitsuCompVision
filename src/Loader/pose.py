@@ -1,5 +1,6 @@
 """Pure-Python pose features, also usable before installing PyTorch."""
 
+import json
 import math
 
 COCO_FLIP_INDICES = (0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15)
@@ -59,3 +60,27 @@ def pose_features(pose1, pose2, *, swap=False):
             features.extend(((x - center_x) / scale, (y - center_y) / scale,
                              min(confidence, 1.0)))
     return features
+
+
+def with_detected_poses(records, detections_path, *, keep_annotated=False):
+    """Return records whose poses come from a detector's JSONL cache.
+
+    Each cache row holds an image id and up to two detected poses. Frames with no
+    detected person are dropped; a lone athlete leaves the second slot empty. With
+    keep_annotated, the annotated records stay and the detected copies are added.
+    """
+    wanted = {record["image"] for record in records}
+    poses = {}
+    with open(detections_path, encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            if row["image"] in wanted:
+                poses[row["image"]] = row["poses"]
+    absent = wanted - poses.keys()
+    if absent:
+        raise ValueError(f"{len(absent)} frames have no cached detection, "
+                         f"e.g. {sorted(absent)[:3]}")
+    detected = [{**record, "pose1": poses[record["image"]][0],
+                 "pose2": (poses[record["image"]] + [None])[1]}
+                for record in records if poses[record["image"]]]
+    return [*records, *detected] if keep_annotated else detected

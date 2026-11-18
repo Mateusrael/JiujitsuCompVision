@@ -28,6 +28,14 @@ confidence values move with their joint unchanged; athlete slots keep their
 order. The pure-Python `pose.horizontal_flip_pose(features)` implements the same
 mapping for a 102-element feature vector. Both augmentations preserve labels
 under the supported 10-class mapping and make independent random choices.
+
+To imitate detector errors, training can also apply `pose_joint_noise` (x/y noise
+over the pair scale), `pose_joint_dropout` and `pose_athlete_dropout`, all 0.0 by
+default. `perturb_pose` normalizes the degraded pose again; evaluation never uses it.
+
+`--pose-detections` replaces the annotated poses of the train split with a detector's
+JSONL cache (`with_detected_poses`); `--pose-keep-annotated` trains on both. Validation
+and test stay annotated, so checkpoint selection does not change.
 `pose`, `pose-wide` and `pose-attention` all use this dataset and its `(B, 102)`
 batch contract. The attention model reshapes the features into 34 joint tokens
 inside the model; it does not introduce a separate feature pipeline. All three

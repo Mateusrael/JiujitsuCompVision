@@ -16,6 +16,7 @@ from tqdm.auto import tqdm
 from src.Dataset.annotations import load_annotations, sha256_file
 from src.Eval.metrics import classification_metrics
 from src.Loader.datasets import ImageDataset, PoseDataset
+from src.Loader.pose import with_detected_poses
 from src.Loader.splits import filter_pose_records, read_manifest, split_records
 from src.Modules.execution import compile_model
 from src.Modules.models import architecture_config, build_model
@@ -76,7 +77,15 @@ def resolve_device(requested):
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable. Check the VLab GPU allocation, "
                            "or pass --device cpu explicitly for a small test.")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("MPS was requested but is unavailable. It requires Apple Silicon "
+                           "and a PyTorch build with MPS support.")
     return device
+
+
+def uses_nonblocking_transfer(device):
+    # Only CUDA loaders pin memory; MPS and CPU copies stay synchronous.
+    return torch.device(device).type == "cuda"
 
 
 def seed_everything(seed):
@@ -84,6 +93,8 @@ def seed_everything(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
@@ -97,7 +108,10 @@ def make_dataset(model, records, config, *, training=False):
     if model in POSE_MODEL_NAMES:
         return PoseDataset(records, config["class_names"], config["label_map"],
                            swap_athletes=training and config["swap_athletes"],
-                           horizontal_flip_prob=flip_probability)
+                           horizontal_flip_prob=flip_probability,
+                           joint_noise=config.get("pose_joint_noise", 0.0) if training else 0.0,
+                           joint_dropout=config.get("pose_joint_dropout", 0.0) if training else 0.0,
+                           athlete_dropout=config.get("pose_athlete_dropout", 0.0) if training else 0.0)
     if model not in IMAGE_MODEL_NAMES:
         raise ValueError(f"Unknown model: {model!r}")
     return ImageDataset(records, config["class_names"], config["label_map"],
@@ -129,8 +143,8 @@ def score_model(model, loader, device, class_names, *, progress=True,
             dynamic_ncols=True, mininterval=0.2, miniters=1,
             disable=not progress, position=position) as batches:
         for features, labels in loader:
-            features = features.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            features = features.to(device, non_blocking=uses_nonblocking_transfer(device))
+            labels = labels.to(device, non_blocking=uses_nonblocking_transfer(device))
             logits = model(features)
             losses = torch.nn.functional.cross_entropy(
                 logits, labels, reduction="none" if evaluation_types is not None else "sum")
@@ -174,8 +188,8 @@ def train_epoch(model, loader, optimizer, device, *, progress=True,
               dynamic_ncols=True, mininterval=0.2, miniters=1,
               disable=not progress, position=position) as batches:
         for features, labels in loader:
-            features = features.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            features = features.to(device, non_blocking=uses_nonblocking_transfer(device))
+            labels = labels.to(device, non_blocking=uses_nonblocking_transfer(device))
             optimizer.zero_grad(set_to_none=True)
             logits = model(features)
             loss = torch.nn.functional.cross_entropy(logits, labels)
@@ -280,6 +294,9 @@ def train(args):
     if args.model in IMAGE_MODEL_NAMES and not images_dir:
         raise ValueError("--images-dir is required for image models")
     images_dir = str(Path(images_dir).expanduser().resolve()) if images_dir else None
+    if config["pose_detections"] and not checkpoint:
+        config["pose_detections"] = str(Path(config["pose_detections"]).expanduser().resolve())
+        config["pose_detections_sha256"] = sha256_file(config["pose_detections"])
     if source_config and images_dir != source_config.get("images_dir"):
         raise ValueError("Cannot change the image directory when resuming or using --init-from")
     config.update({"schema_version": 1, "model": args.model,
@@ -316,6 +333,10 @@ def train(args):
             continue
         if part == "val":
             validation_types = evaluation_types_for_records(selected_records, manifest)
+        if part == "train" and config["pose_detections"]:
+            selected_records = with_detected_poses(selected_records, config["pose_detections"],
+                                                   keep_annotated=config["pose_keep_annotated"])
+            print(f"train: {len(selected_records):,} samples after applying detected poses", flush=True)
         dataset = make_dataset(args.model, selected_records, config, training=part == "train")
         loaders[part] = make_loader(dataset, config, device, training=part == "train",
                                     generator=generators[part])
