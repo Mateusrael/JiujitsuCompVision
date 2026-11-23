@@ -23,6 +23,11 @@ in JupyterLab to browse curves, inspect class metrics, and predict random
 samples with image/pose overlays. See the [notebook setup](docs/model_explorer.md)
 for the project kernel and controls.
 
+Use [external evaluation and pose comparisons](docs/external_evaluation.md) to
+test existing checkpoints on the new image set, or compare the same pose
+classifier using supplied annotations, YOLO detections and ViTPose detections.
+These evaluations do not retrain or modify the checkpoints.
+
 ```text
 install/        environment probe and Linux dependency setup
 launchers/      editable paths and commands to run common operations
@@ -36,7 +41,7 @@ src/
 tests/          small checks using synthetic data
 docs/           versioned multiview section plan and recording-map template
 notebooks/      interactive model exploration notebooks
-Data/           remote dataset and split manifests (ignored by Git)
+Data/           remote data (ignored), plus the tracked external image set
 trainings/      per-run config, checkpoints and diagnostics (ignored)
 diagnostics/    environment and dataset reports (ignored)
 dist/           upload ZIPs generated locally (ignored)

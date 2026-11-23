@@ -1,0 +1,4 @@
+# Optional image -> COCO-17 pose extraction. Install after bootstrap.sh.
+-r requirements-runtime.txt
+ultralytics>=8.3,<9
+scipy>=1.11,<2

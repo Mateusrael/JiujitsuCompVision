@@ -12,9 +12,13 @@ DEFAULTS = {"epochs": 20, "batch_size": 128, "lr": 0.001, "weight_decay": 0.0001
             "workers": 2,
             "seed": 42, "pretrained": True, "fine_tune": False,
             "swap_athletes": True, "horizontal_flip_prob": 0.0, "dropout": 0.0,
+            "pose_joint_noise": 0.0, "pose_joint_dropout": 0.0, "pose_athlete_dropout": 0.0,
+            "pose_detections": None, "pose_keep_annotated": False,
             "compile": False, "compile_mode": "default", "progress": True}
 RESUME_FIXED = ("batch_size", "lr", "weight_decay", "workers", "seed", "pretrained",
-                "fine_tune", "swap_athletes", "horizontal_flip_prob", "dropout")
+                "fine_tune", "swap_athletes", "horizontal_flip_prob", "dropout",
+                "pose_joint_noise", "pose_joint_dropout", "pose_athlete_dropout",
+                "pose_detections", "pose_keep_annotated")
 ATTENTION_DEFAULTS = {"attention_dim": 128, "attention_heads": 4, "attention_layers": 4,
                       "attention_mlp_dim": 512, "attention_dropout": 0.0,
                       "attention_mlp_dropout": 0.0,
@@ -27,6 +31,11 @@ def resolve_settings(args, previous=None):
     for name, default in DEFAULTS.items():
         supplied = getattr(args, name, None)
         saved = (previous or {}).get(name, default)
+        if name == "pose_detections":
+            # Compare file identity after resolving both spellings, including
+            # relative CLI paths and the absolute path stored in checkpoints.
+            supplied = str(Path(supplied).expanduser().resolve()) if supplied is not None else None
+            saved = str(Path(saved).expanduser().resolve()) if saved is not None else None
         if previous is not None and name in RESUME_FIXED:
             if supplied is not None and supplied != saved:
                 raise ValueError(f"Cannot change --{name.replace('_', '-')} when resuming")
@@ -89,6 +98,19 @@ def resolve_settings(args, previous=None):
                 or (value > 1 if inclusive_upper else value >= 1)):
             interval = "[0, 1]" if inclusive_upper else "[0, 1)"
             raise ValueError(f"--{name.replace('_', '-')} must be finite and in {interval}")
+    for name, upper in (("pose_joint_noise", None), ("pose_joint_dropout", 1), ("pose_athlete_dropout", 1)):
+        value = resolved[name]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0 or (upper is not None and value >= upper)):
+            raise ValueError(f"--{name.replace('_', '-')} must be finite, nonnegative and below one"
+                             if upper is not None else
+                             f"--{name.replace('_', '-')} must be finite and nonnegative")
+        if value and args.model not in POSE_MODEL_NAMES:
+            raise ValueError(f"--{name.replace('_', '-')} applies only to pose models")
+    if resolved["pose_detections"] and args.model not in POSE_MODEL_NAMES:
+        raise ValueError("--pose-detections applies only to pose models")
+    if resolved["pose_keep_annotated"] and not resolved["pose_detections"]:
+        raise ValueError("--pose-keep-annotated requires --pose-detections")
     if args.model == "pose-attention":
         for name in ("attention_dim", "attention_heads", "attention_layers", "attention_mlp_dim"):
             value = resolved[name]

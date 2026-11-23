@@ -28,11 +28,31 @@ confidence values move with their joint unchanged; athlete slots keep their
 order. The pure-Python `pose.horizontal_flip_pose(features)` implements the same
 mapping for a 102-element feature vector. Both augmentations preserve labels
 under the supported 10-class mapping and make independent random choices.
+
+To imitate detector errors, training can also apply `pose_joint_noise` (x/y noise
+over the pair scale), `pose_joint_dropout` and `pose_athlete_dropout`, all 0.0 by
+default. `perturb_pose` normalizes the degraded pose again; evaluation never uses it.
+
+`--pose-detections` replaces the annotated poses of the train split with a detector's
+JSONL cache (`with_detected_poses`); `--pose-keep-annotated` trains on both. Validation
+and test stay annotated, so checkpoint selection does not change.
+Cache rows contain a unique `image` string and `poses`, a list of zero to two
+17-joint poses with finite `[x, y, confidence]` values. Additional detector metadata
+is allowed. Every eligible training frame must have a row; empty detections omit
+the detected copy, while one detected athlete leaves the second slot empty.
+The annotation eligibility filter runs before this replacement. The cache SHA-256
+is saved with the run and checked again on resume and when consuming its rows;
+changed caches and cache-trained checkpoints without a saved hash cannot resume.
+`sample_counts` retains `original`, `eligible` and `removed` annotation counts;
+`samples` records the actual population after detection replacement or mixing.
+Detection training additionally reports `annotated_samples`, `detected_samples`
+and `frames_without_detection`.
 `pose`, `pose-wide` and `pose-attention` all use this dataset and its `(B, 102)`
 batch contract. The attention model reshapes the features into 34 joint tokens
 inside the model; it does not introduce a separate feature pipeline. All three
-pose training/evaluation entry points remove records missing either athlete's
-observed pose. Confidence <= 0 still supplies the attention model's joint mask.
+pose training/evaluation entry points remove annotations missing either athlete's
+observed pose; training detector copies may contain only one detected athlete.
+Confidence <= 0 still supplies the attention model's joint mask.
 
 `datasets.ImageDataset` requires exactly one `<image>.jpg`, `.jpeg`, or `.png`
 directly under the supplied image directory. It resizes the entire frame with

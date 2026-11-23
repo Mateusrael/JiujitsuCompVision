@@ -9,6 +9,7 @@ import torch
 def random_state(generators):
     return {"python": random.getstate(), "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None,
             "loaders": {name: generator.get_state() for name, generator in generators.items()}}
 
 
@@ -19,6 +20,9 @@ def restore_random_state(state, generators):
         if len(state["cuda"]) != torch.cuda.device_count():
             raise ValueError("CUDA device count changed since checkpoint; exact resume is unavailable")
         torch.cuda.set_rng_state_all(state["cuda"])
+    # Checkpoints written before MPS support have no "mps" entry.
+    if state.get("mps") is not None and torch.backends.mps.is_available():
+        torch.mps.set_rng_state(state["mps"])
     for name, generator in generators.items():
         generator.set_state(state["loaders"][name])
 

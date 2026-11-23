@@ -20,9 +20,39 @@ def should_flip(probability):
     return probability > 0 and (probability == 1 or torch.rand(()) < probability)
 
 
+def perturb_pose(features, *, joint_noise=0.0, joint_dropout=0.0, athlete_dropout=0.0):
+    """Imitate detector errors on 102 pair-normalized features; the input is not modified.
+
+    Observed joints get Gaussian x/y noise and may be removed; one athlete may be
+    removed entirely. The result is normalized again, as pose_features would do
+    for the degraded detection. A frame always keeps at least one observed joint.
+    """
+    joints = features.reshape(34, 3).clone()
+    observed = joints[:, 2] > 0
+    if joint_noise > 0:
+        joints[observed, :2] += torch.randn((int(observed.sum()), 2)) * joint_noise
+    keep = observed.clone()
+    if joint_dropout > 0:
+        keep &= torch.rand(34) >= joint_dropout
+    if athlete_dropout > 0 and torch.rand(()) < athlete_dropout:
+        if torch.rand(()) < 0.5:
+            keep[:17] = False
+        else:
+            keep[17:] = False
+    if not keep.any():
+        keep = observed
+    joints[~keep] = 0.0
+    if keep.any():
+        kept = joints[keep, :2]
+        low, high = kept.min(0).values, kept.max(0).values
+        joints[keep, :2] = (kept - (low + high) / 2) / (high - low).max().clamp_min(1e-8)
+    return joints.reshape(102)
+
+
 class PoseDataset(Dataset):
     def __init__(self, records, class_names, label_map, *, swap_athletes=False,
-                 horizontal_flip_prob=0.0):
+                 horizontal_flip_prob=0.0, joint_noise=0.0, joint_dropout=0.0,
+                 athlete_dropout=0.0):
         validate_flip_probability(horizontal_flip_prob)
         class_index = {name: index for index, name in enumerate(class_names)}
         self.features = torch.tensor(
@@ -33,6 +63,8 @@ class PoseDataset(Dataset):
             dtype=torch.long)
         self.swap_athletes = swap_athletes
         self.horizontal_flip_prob = horizontal_flip_prob
+        self.perturbation = {"joint_noise": joint_noise, "joint_dropout": joint_dropout,
+                             "athlete_dropout": athlete_dropout}
 
     def __len__(self):
         return len(self.labels)
@@ -45,6 +77,8 @@ class PoseDataset(Dataset):
             joints = features.reshape(2, 17, 3)[:, list(COCO_FLIP_INDICES), :].clone()
             joints[..., 0].neg_()
             features = joints.reshape(102)
+        if any(self.perturbation.values()):
+            features = perturb_pose(features, **self.perturbation)
         return features, self.labels[index]
 
 
