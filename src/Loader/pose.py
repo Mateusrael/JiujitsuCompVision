@@ -1,5 +1,6 @@
 """Pure-Python pose features, also usable before installing PyTorch."""
 
+import hashlib
 import json
 import math
 
@@ -62,20 +63,53 @@ def pose_features(pose1, pose2, *, swap=False):
     return features
 
 
-def with_detected_poses(records, detections_path, *, keep_annotated=False):
+def _validate_detection_row(row, line_number):
+    prefix = f"Invalid detection cache row at line {line_number}"
+    if (not isinstance(row, dict) or not isinstance(row.get("image"), str)
+            or not row["image"].strip()):
+        raise ValueError(f"{prefix}: image must be a nonempty string")
+    poses = row.get("poses")
+    if not isinstance(poses, list) or len(poses) > 2:
+        raise ValueError(f"{prefix}: poses must be a list of zero, one or two poses")
+    for pose in poses:
+        if not isinstance(pose, list) or len(pose) != 17:
+            raise ValueError(f"{prefix}: each pose must contain 17 joints")
+        for joint in pose:
+            if not isinstance(joint, list) or len(joint) != 3:
+                raise ValueError(f"{prefix}: each joint must contain x, y, confidence")
+            if any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not math.isfinite(value) for value in joint):
+                raise ValueError(f"{prefix}: joint values must be finite numbers")
+
+
+def with_detected_poses(records, detections_path, *, keep_annotated=False,
+                        expected_sha256=None):
     """Return records whose poses come from a detector's JSONL cache.
 
     Each cache row holds an image id and up to two detected poses. Frames with no
     detected person are dropped; a lone athlete leaves the second slot empty. With
     keep_annotated, the annotated records stay and the detected copies are added.
+    When supplied, expected_sha256 checks the exact bytes consumed by this loader.
     """
     wanted = {record["image"] for record in records}
     poses = {}
-    with open(detections_path, encoding="utf-8") as handle:
-        for line in handle:
-            row = json.loads(line)
+    seen = set()
+    digest = hashlib.sha256()
+    with open(detections_path, "rb") as handle:
+        for line_number, line in enumerate(handle, 1):
+            digest.update(line)
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise ValueError(f"Invalid detection cache JSON at line {line_number}") from error
+            _validate_detection_row(row, line_number)
+            if row["image"] in seen:
+                raise ValueError(f"Duplicate detection cache image {row['image']!r} at line {line_number}")
+            seen.add(row["image"])
             if row["image"] in wanted:
                 poses[row["image"]] = row["poses"]
+    if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+        raise ValueError("Detection cache SHA-256 changed while loading; training was not started")
     absent = wanted - poses.keys()
     if absent:
         raise ValueError(f"{len(absent)} frames have no cached detection, "

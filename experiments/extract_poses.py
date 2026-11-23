@@ -1,10 +1,7 @@
-"""Cache ViTPose detections for every frame of a split's pose population.
+"""Cache detected poses for a verified manifest's two-pose population.
 
-Frames run in a fixed shuffled order, so a partial run is still a usable sample of
-every class. Rerun the same command to resume. Output: diagnostics/pose_detectors/.
-
-    .venv/bin/python experiments/extract_poses.py --split train --limit 20
-    .venv/bin/python experiments/extract_poses.py --split train
+Frames are shuffled deterministically; rerunning resumes completed detections.
+Supply --split-file explicitly to select the intended training split.
 """
 
 import argparse
@@ -13,30 +10,37 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from experiments.compare_pose_detectors import detect_all
 from src.Eval.exploration import ExplorationData
+from src.Eval.pose_detection import detect_records
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--split", choices=("train", "val"), default="train")
-    parser.add_argument("--limit", type=int, help="Quick pilot: process only this many frames")
-    parser.add_argument("--device", default="mps")
+    parser.add_argument("--annotations", default=str(ROOT / "Data/annotations.json"))
+    parser.add_argument("--images-dir", default=str(ROOT / "Data/images"))
+    parser.add_argument("--split-file", required=True)
+    parser.add_argument("--split", choices=("train", "val", "test"), default="train")
+    parser.add_argument("--detector", choices=("yolo", "vitpose"), default="vitpose")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--device", default="cuda", help="cpu, cuda[:index], or mps")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-
-    data = ExplorationData(ROOT / "Data/annotations.json", ROOT / "Data/splits/multiview_sections.json")
+    parser.add_argument("--cache-dir", default=str(ROOT / "diagnostics/pose_detectors/verified_cache"))
+    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args(argv)
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
+    data = ExplorationData(args.annotations, args.split_file, args.images_dir)
     records = sorted(data.select("pose-wide", split=args.split), key=lambda record: record["image"])
     random.Random(args.seed).shuffle(records)
-    absent = [record["image"] for record in records if not Path(data.image_path(record)).is_file()]
-    if absent:
-        raise SystemExit(f"{len(absent)} of {len(records)} images are missing, e.g. {absent[:3]}")
     if args.limit:
         records = records[:args.limit]
-    detections = detect_all("vitpose", records, data, args.device)
-    print(f"Done: {sum(record['image'] in detections for record in records)}/{len(records)} frames")
+    detections = detect_records(args.detector, records, data.image_path, args.cache_dir,
+                               args.device, progress=args.progress)
+    print(f"Done: {len(detections)}/{len(records)} frames; cache: "
+          f"{Path(args.cache_dir) / (args.detector + '.jsonl')}")
 
 
 if __name__ == "__main__":

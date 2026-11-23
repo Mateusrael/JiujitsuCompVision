@@ -31,6 +31,11 @@ def resolve_settings(args, previous=None):
     for name, default in DEFAULTS.items():
         supplied = getattr(args, name, None)
         saved = (previous or {}).get(name, default)
+        if name == "pose_detections":
+            # Compare file identity after resolving both spellings, including
+            # relative CLI paths and the absolute path stored in checkpoints.
+            supplied = str(Path(supplied).expanduser().resolve()) if supplied is not None else None
+            saved = str(Path(saved).expanduser().resolve()) if saved is not None else None
         if previous is not None and name in RESUME_FIXED:
             if supplied is not None and supplied != saved:
                 raise ValueError(f"Cannot change --{name.replace('_', '-')} when resuming")

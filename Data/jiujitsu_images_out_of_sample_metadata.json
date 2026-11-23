@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "dataset": "jiujitsu_images_out_of_sample",
+  "images_directory": "jiujitsu_images_out_of_sample",
+  "annotations_file": "jiujitsu_images_out_of_sample_annotations.json",
+  "samples": 99,
+  "class_counts": {
+    "5050_guard": 10,
+    "back": 10,
+    "closed_guard": 10,
+    "half_guard": 9,
+    "mount": 10,
+    "open_guard": 10,
+    "side_control": 10,
+    "standing": 10,
+    "takedown": 10,
+    "turtle": 10
+  },
+  "position_labels": {
+    "origin": "human_annotation",
+    "athlete_suffix": "The 1/2 suffix refers to the saved pose order."
+  },
+  "poses": {
+    "origin": "detector_generated",
+    "pose_model": "usyd-community/vitpose-plus-huge",
+    "person_model": "PekingU/rtdetr_r50vd_coco_o365",
+    "keypoints": "COCO-17",
+    "coordinates": "original image pixels; third value is detector confidence",
+    "independently_verified_keypoint_ground_truth": false,
+    "model_revision": null,
+    "revision_note": "Exact model weight revision was not recorded during the original extraction."
+  },
+  "identity": {
+    "image": "path relative to images_directory",
+    "image_sha256": "SHA-256 of the image file bytes",
+    "frame": "Preserved record identifier; not a verified video timeline frame."
+  },
+  "source_provenance": {
+    "source_urls_recorded": false,
+    "independence_from_training_dataset_verified": false
+  },
+  "removed_duplicates": [
+    {
+      "removed_image": "half_guard/image_0005.jpg",
+      "retained_image": "half_guard/image_0003.jpg",
+      "reason": "Identical file content; remaining image IDs and frame fields are unchanged."
+    }
+  ]
+}

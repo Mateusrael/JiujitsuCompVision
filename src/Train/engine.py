@@ -294,9 +294,15 @@ def train(args):
     if args.model in IMAGE_MODEL_NAMES and not images_dir:
         raise ValueError("--images-dir is required for image models")
     images_dir = str(Path(images_dir).expanduser().resolve()) if images_dir else None
-    if config["pose_detections"] and not checkpoint:
-        config["pose_detections"] = str(Path(config["pose_detections"]).expanduser().resolve())
-        config["pose_detections_sha256"] = sha256_file(config["pose_detections"])
+    if config["pose_detections"]:
+        saved_digest = (previous or {}).get("pose_detections_sha256")
+        if checkpoint and not saved_digest:
+            raise ValueError("Cannot resume detected-pose training: checkpoint is missing "
+                             "pose_detections_sha256")
+        current_digest = sha256_file(config["pose_detections"])
+        if checkpoint and current_digest != saved_digest:
+            raise ValueError("Cannot resume: detection cache SHA-256 does not match the checkpoint")
+        config["pose_detections_sha256"] = current_digest
     if source_config and images_dir != source_config.get("images_dir"):
         raise ValueError("Cannot change the image directory when resuming or using --init-from")
     config.update({"schema_version": 1, "model": args.model,
@@ -326,6 +332,7 @@ def train(args):
     config["sample_counts"] = {}
     for part in ("train", "val", "test"):
         selected_records, counts = select_model_records(args.model, records, manifest, part)
+        counts["samples"] = len(selected_records)
         config["sample_counts"][part] = counts
         print(f"{part}: {counts['eligible']:,} eligible / {counts['original']:,} assigned "
               f"({counts['removed']:,} removed by model filter)", flush=True)
@@ -334,8 +341,16 @@ def train(args):
         if part == "val":
             validation_types = evaluation_types_for_records(selected_records, manifest)
         if part == "train" and config["pose_detections"]:
+            annotated_count = len(selected_records) if config["pose_keep_annotated"] else 0
             selected_records = with_detected_poses(selected_records, config["pose_detections"],
-                                                   keep_annotated=config["pose_keep_annotated"])
+                                                   keep_annotated=config["pose_keep_annotated"],
+                                                   expected_sha256=config["pose_detections_sha256"])
+            detected_count = len(selected_records) - annotated_count
+            counts.update({"samples": len(selected_records), "annotated_samples": annotated_count,
+                           "detected_samples": detected_count,
+                           "frames_without_detection": counts["eligible"] - detected_count})
+            if not selected_records:
+                raise ValueError("No training samples remain after applying detected poses")
             print(f"train: {len(selected_records):,} samples after applying detected poses", flush=True)
         dataset = make_dataset(args.model, selected_records, config, training=part == "train")
         loaders[part] = make_loader(dataset, config, device, training=part == "train",
