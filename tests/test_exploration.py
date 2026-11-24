@@ -45,6 +45,24 @@ def fixture(root, *, images=False):
     return ExplorationData(annotations, split, images_dir)
 
 
+def detected_cache(root, data):
+    """Distinct detected geometry and three incomplete validation inputs."""
+    rows = [{"image": row["image"], "poses": [
+        [[float(j * 1.5), float(j), .35] for j in range(17)],
+        [[float(j + 44), float(17 - j), .6] for j in range(17)],
+    ]} for row in data.records]
+    for row in rows:
+        if row["image"] == "0100001":
+            row["poses"] = []
+        elif row["image"] == "0100002":
+            row["poses"] = row["poses"][:1]
+        elif row["image"] == "0100003":
+            row["poses"][1] = [[0., 0., 0.]] * 17
+    path = root / "detected.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return path, {row["image"]: row["poses"] for row in rows}
+
+
 class ExplorationSelectionTests(unittest.TestCase):
     def test_filters_preserve_partition_and_pose_eligibility(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -209,6 +227,80 @@ class ExplorationInferenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "split_sha256"):
                 ModelExplorer.from_run(target, data)
             explorer.close()
+
+    def test_detected_checkpoint_selection_predictions_and_input_identity(self):
+        import torch
+        from src.Loader.datasets import PoseDataset
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = fixture(root)
+            target, original = self.checkpoint(root, data)
+            cache, poses = detected_cache(root, data)
+            payload = torch.load(target, weights_only=False)
+            payload["config"].update(pose_detections=str(cache), pose_detections_scope="all",
+                                     pose_detections_sha256=sha256_file(cache))
+            torch.save(payload, target)
+            explorer = ModelExplorer.from_run(target, data)
+            self.addCleanup(explorer.close)
+            rows = explorer.select(split="val")
+            self.assertEqual([r["frame"] for r in rows], [0, 4, 5, 6, 7, 8, 9])
+            self.assertEqual(explorer.select_from_run(target, data, split="val"), rows)
+            self.assertEqual(explorer.sample(count=3, seed=7), explorer.sample(count=3, seed=7))
+            self.assertTrue(all(row is data.by_id[row["image"]] for row in rows))
+            expected_rows = [{**row, "pose1": poses[row["image"]][0],
+                              "pose2": poses[row["image"]][1]} for row in rows]
+            self.assertEqual(explorer.prepare_records(rows), expected_rows)
+            expected_inputs = PoseDataset(expected_rows, data.class_names, data.manifest["label_map"])
+            with torch.inference_mode():
+                expected = original(torch.stack([expected_inputs[i][0]
+                                                 for i in range(len(rows))])).softmax(dim=1)
+            actual = explorer.predict(rows, top_k=4)
+            torch.testing.assert_close(torch.tensor([r["probabilities"] for r in actual]), expected)
+            self.assertTrue(all(row["pose_source"] == "detected" for row in actual))
+            self.assertEqual(explorer.predict([row["image"] for row in rows], top_k=4), actual)
+            self.assertIsNone(data.by_id["0100000"]["pose2"])
+            self.assertEqual(explorer.select(split="val", frame_range=(0, 0)),
+                             [data.by_id["0100000"]])
+            recovered = explorer.predict(["0100000"], top_k=4)[0]
+            self.assertEqual(recovered["image"], "0100000")
+            torch.testing.assert_close(torch.tensor(recovered["probabilities"]),
+                                       torch.tensor(actual[0]["probabilities"]))
+            for image_id in ("0100001", "0100002", "0100003"):
+                with self.subTest(image_id=image_id), self.assertRaisesRegex(ValueError, "pose-ineligible"):
+                    explorer.predict([image_id])
+            self.assertEqual(explorer.select(split="test", frame_range=(4, 5)),
+                             [data.by_id["0200004"], data.by_id["0200005"]])
+            for part, image_id in (("train", "0000000"), ("test", "0200000")):
+                self.assertEqual(explorer.select(split=part, frame_range=(0, 0)),
+                                 [data.by_id[image_id]])
+
+    def test_detected_checkpoint_cache_mismatch_fails_before_model_construction(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = fixture(root)
+            target, _ = self.checkpoint(root, data)
+            cache, _ = detected_cache(root, data)
+            payload = torch.load(target, weights_only=False)
+            payload["config"].update(pose_detections=str(cache), pose_detections_scope="all",
+                                     pose_detections_sha256="0" * 64)
+            torch.save(payload, target)
+            with patch("src.Modules.models.build_model") as build:
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    ModelExplorer.from_run(target, data)
+                build.assert_not_called()
+            # Checkpoints written before scopes retain supplied validation inputs.
+            payload["config"].pop("pose_detections_scope")
+            payload["config"]["pose_detections"] = str(root / "unavailable-legacy-cache.jsonl")
+            torch.save(payload, target)
+            explorer = ModelExplorer.from_run(target, data)
+            self.addCleanup(explorer.close)
+            rows = data.select("pose", split="val")
+            self.assertEqual(explorer.select(split="val"), rows)
+            self.assertEqual(explorer.prepare_records(rows), rows)
+            self.assertEqual(explorer.pose_source, "annotations")
 
     def test_wide_and_attention_restore_saved_architecture_and_match_predictions(self):
         import torch

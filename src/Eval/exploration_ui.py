@@ -143,7 +143,8 @@ class RunBrowser:
                 print(f"{type(error).__name__}: {error}")
 
 
-def plot_predictions(data, records, predictions, *, overlay=True, min_confidence=0.0):
+def plot_predictions(data, records, predictions, *, overlay=True, min_confidence=0.0,
+                     session=None):
     """Return original images/pose overlays beside the top predicted classes."""
     import matplotlib.pyplot as plt
     if not records or len(records) != len(predictions):
@@ -157,12 +158,14 @@ def plot_predictions(data, records, predictions, *, overlay=True, min_confidence
         try:
             image_ax.imshow(data.open_image(record))
             if overlay:
-                data.draw_pose(image_ax, record, min_confidence=min_confidence)
+                (session or data).draw_pose(image_ax, record, min_confidence=min_confidence)
         except FileNotFoundError as error:
             image_ax.text(.5, .5, str(error), ha="center", va="center",
                           wrap=True, transform=image_ax.transAxes)
         image_ax.set_axis_off()
-        image_ax.set_title(f"{record['image']} | source {result['source']} | frame {result['frame']}\n"
+        pose_label = (f" | Poses: {session.pose_source if session else 'annotations'}"
+                      if overlay else "")
+        image_ax.set_title(f"{record['image']} | source {result['source']} | frame {result['frame']}{pose_label}\n"
                            f"Label: {result['actual']} | Prediction: {result['predicted']}",
                            fontsize=11, color="#166534" if result["correct"] else "#B91C1C")
         top = result["top_k"]
@@ -183,11 +186,12 @@ def plot_model_input(session, record):
     """Inspect the exact deterministic tensor passed to the loaded model."""
     import matplotlib.pyplot as plt
     from src.Train.engine import make_dataset
-    tensor, _ = make_dataset(session.model_name, [record], session.config, training=False)[0]
+    inputs = session.prepare_records([record])
+    tensor, _ = make_dataset(session.model_name, inputs, session.config, training=False)[0]
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), layout="constrained")
     axes[0].imshow(session.data.open_image(record))
-    session.data.draw_pose(axes[0], record)
-    axes[0].set_title("Original frame and supplied poses")
+    session.draw_pose(axes[0], record)
+    axes[0].set_title(f"Original frame and {session.pose_source} poses")
     axes[0].set_axis_off()
     if session.model_name in POSE_MODEL_NAMES:
         joints = tensor.reshape(2, 17, 3).numpy()
@@ -313,6 +317,7 @@ class PredictionBrowser:
             _set_output_text(self.status,
                 f"Loaded {name}\n{self.session.model_name}, checkpoint epoch "
                 f"{self.session.checkpoint_epoch}, {total:,} parameters, {self.device.value}.\n"
+                f"Pose source: {self.session.pose_source}. "
                 "Eval mode; augmentation disabled. Softmax scores are not calibrated confidence.")
         except (OSError, ValueError, RuntimeError, ImportError) as error:
             _set_output_text(self.status, f"{type(error).__name__}: {error}")
@@ -335,16 +340,16 @@ class PredictionBrowser:
                            source=self.source.value, evaluation_type=self.cohort.value,
                            frame_range=(self.frame_min.value, frame_max))
             if exact:
-                candidates = self.data.select(self.session.model_name, **filters)
+                candidates = self.session.select(**filters)
                 records = [r for r in candidates if r["image"] == self.image_id.value.strip()]
                 if not records:
                     raise ValueError("That image is absent or outside the current eligible filters")
             else:
                 count = self.count.value if self.result_filter.value == "Any" else max(
                     self.pool_size.value, self.count.value)
-                records = self.data.sample(self.session.model_name, count=count,
-                                           seed=self.seed.value if self.fixed_seed.value else None,
-                                           **filters)
+                records = self.session.sample(count=count,
+                                              seed=self.seed.value if self.fixed_seed.value else None,
+                                              **filters)
             predictions = self.session.predict(records, top_k=3, batch_size=16)
             pairs = list(zip(records, predictions))
             tested = len(pairs)
@@ -369,7 +374,8 @@ class PredictionBrowser:
                     "No matching results in this random pool. Try another batch or a larger pool.\n")
                 return
             fig = plot_predictions(self.data, self.records, self.predictions,
-                                   overlay=self.overlay.value, min_confidence=self.confidence.value)
+                                   overlay=self.overlay.value, min_confidence=self.confidence.value,
+                                   session=self.session)
             _show_figure(self.output, fig)
         except (OSError, ValueError, RuntimeError, KeyError) as error:
             _set_output_text(self.output, f"{type(error).__name__}: {error}")

@@ -42,6 +42,41 @@ def resolve_checkpoint(run_or_checkpoint, checkpoint="best"):
     return path
 
 
+def _checkpoint_inputs(config, data):
+    """Validate one checkpoint's data identity and freeze its inference inputs."""
+    from src.Loader.pose_source import resolve_pose_data
+    from src.Train.engine import validate_checkpoint_data
+
+    data.verify_unchanged()
+    validate_checkpoint_data(config, config["model"], data.annotations_path,
+                             data.split_path, data.manifest)
+    records, manifest = resolve_pose_data(data.records, data.manifest, config)
+    eligible = [row for row in records
+                if manifest["assignments"][row["image"]] in ("train", "val", "test")]
+    if config["model"] in POSE_MODEL_NAMES:
+        eligible = filter_pose_records(eligible, manifest=manifest)
+    return {row["image"]: row for row in eligible}
+
+
+def _draw_pose(ax, record, min_confidence):
+    if (isinstance(min_confidence, bool) or not isinstance(min_confidence, (int, float))
+            or not math.isfinite(min_confidence) or min_confidence < 0):
+        raise ValueError("min_confidence must be finite and nonnegative")
+    for slot, color in zip(("pose1", "pose2"), POSE_COLORS):
+        pose = record.get(slot)
+        if not pose:
+            continue
+        valid = [joint[2] > min_confidence for joint in pose]
+        for start, end in POSE_EDGES:
+            if valid[start] and valid[end]:
+                ax.plot([pose[start][0], pose[end][0]], [pose[start][1], pose[end][1]],
+                        color=color, linewidth=1.6, alpha=0.9)
+        ax.scatter([joint[0] for joint, observed in zip(pose, valid) if observed],
+                   [joint[1] for joint, observed in zip(pose, valid) if observed],
+                   c=color, s=18, edgecolors="white", linewidths=0.4, label=slot)
+    return ax
+
+
 class ExplorationData:
     """Verified canonical annotations, split membership and model eligibility.
 
@@ -159,23 +194,8 @@ class ExplorationData:
 
     def draw_pose(self, ax, record_or_id, *, min_confidence=0.0):
         """Draw supplied raw pixel coordinates over an existing image axes."""
-        if (isinstance(min_confidence, bool) or not isinstance(min_confidence, (int, float))
-                or not math.isfinite(min_confidence) or min_confidence < 0):
-            raise ValueError("min_confidence must be finite and nonnegative")
         record = self.canonical(record_or_id)
-        for slot, color in zip(("pose1", "pose2"), POSE_COLORS):
-            pose = record.get(slot)
-            if not pose:
-                continue
-            valid = [joint[2] > min_confidence for joint in pose]
-            for start, end in POSE_EDGES:
-                if valid[start] and valid[end]:
-                    ax.plot([pose[start][0], pose[end][0]], [pose[start][1], pose[end][1]],
-                            color=color, linewidth=1.6, alpha=0.9)
-            ax.scatter([joint[0] for joint, observed in zip(pose, valid) if observed],
-                       [joint[1] for joint, observed in zip(pose, valid) if observed],
-                       c=color, s=18, edgecolors="white", linewidths=0.4, label=slot)
-        return ax
+        return _draw_pose(ax, record, min_confidence)
 
 
 class ModelExplorer:
@@ -191,7 +211,6 @@ class ModelExplorer:
         import torch
         from src.Modules.models import build_model
         from src.Train.checkpoints import load_checkpoint
-        from src.Train.engine import validate_checkpoint_data
 
         if not isinstance(data, ExplorationData):
             raise TypeError("data must be an ExplorationData instance")
@@ -206,11 +225,9 @@ class ModelExplorer:
             if not 0 <= index < torch.cuda.device_count():
                 raise ValueError(f"CUDA device index {index} is not visible to this process")
             target = torch.device("cuda", index)
-        data.verify_unchanged()
         payload = load_checkpoint(path)
         config = dict(payload["config"])
-        validate_checkpoint_data(config, config["model"], data.annotations_path,
-                                 data.split_path, data.manifest)
+        input_by_id = _checkpoint_inputs(config, data)
         # Relocated files are allowed only after the hashes and label map agree.
         config.update(annotations=str(data.annotations_path), split=str(data.split_path),
                       images_dir=str(data.images_dir))
@@ -224,6 +241,7 @@ class ModelExplorer:
         instance.model_name = config["model"]
         instance.config = config
         instance.data = data
+        instance.input_by_id = input_by_id
         instance.device = target
         trainable = sum(parameter.numel() for parameter in model.parameters()
                         if parameter.requires_grad)
@@ -234,6 +252,59 @@ class ModelExplorer:
         del payload
         instance.model = model.to(target).eval()
         return instance
+
+    @classmethod
+    def select_from_run(cls, run_or_checkpoint, data, *, checkpoint="best", **filters):
+        """Select eligible canonical rows without constructing a resident model."""
+        from src.Train.checkpoints import load_checkpoint
+
+        if not isinstance(data, ExplorationData):
+            raise TypeError("data must be an ExplorationData instance")
+        payload = load_checkpoint(resolve_checkpoint(run_or_checkpoint, checkpoint))
+        config = payload["config"]
+        inputs = _checkpoint_inputs(config, data)
+        return [row for row in data.select("image", **filters)
+                if row["image"] in inputs]
+
+    @property
+    def pose_source(self):
+        """The deterministic pose source used for checkpoint inspection."""
+        return ("detected" if self.model_name in POSE_MODEL_NAMES
+                and self.config.get("pose_detections_scope", "train") == "all"
+                else "annotations")
+
+    def select(self, **filters):
+        """Select canonical rows eligible for this checkpoint's actual inputs."""
+        return [row for row in self.data.select("image", **filters)
+                if row["image"] in self.input_by_id]
+
+    def sample(self, *, count=6, seed=None, **filters):
+        _positive_integer(count, "count")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise ValueError("seed must be an integer or None")
+        rows = self.select(**filters)
+        if not rows:
+            raise ValueError("No eligible samples match the checkpoint's current filters")
+        return random.Random(seed).sample(rows, min(count, len(rows)))
+
+    def prepare_records(self, records):
+        """Resolve canonical rows/IDs to validated inputs, preserving order."""
+        if isinstance(records, (str, dict)):
+            raise TypeError("Pass a list of records or image IDs")
+        rows = [self.data.canonical(record) for record in records]
+        for row in rows:
+            image_id = row["image"]
+            if self.data.manifest["assignments"][image_id] not in ("train", "val", "test"):
+                raise ValueError(f"Sample {image_id} is excluded from the split")
+            if image_id not in self.input_by_id:
+                raise ValueError(f"Sample {image_id} is pose-ineligible for this checkpoint; "
+                                 "use session.select() or session.sample()")
+        return [self.input_by_id[row["image"]] for row in rows]
+
+    def draw_pose(self, ax, record_or_id, *, min_confidence=0.0):
+        """Draw the same raw poses used for this checkpoint's prediction."""
+        record = self.prepare_records([record_or_id])[0]
+        return _draw_pose(ax, record, min_confidence)
 
     def predict(self, records, *, top_k=3, batch_size=32):
         """Return CPU-only prediction dictionaries in exactly the requested order.
@@ -251,16 +322,7 @@ class ModelExplorer:
         _positive_integer(batch_size, "batch_size")
         if top_k > len(self.class_names):
             raise ValueError(f"top_k cannot exceed {len(self.class_names)} classes")
-        if isinstance(records, (str, dict)):
-            raise TypeError("Pass a list of records or image IDs")
-        rows = [self.data.canonical(record) for record in records]
-        for record in rows:
-            image_id = record["image"]
-            if self.data.manifest["assignments"][image_id] not in ("train", "val", "test"):
-                raise ValueError(f"Sample {image_id} is excluded from the split")
-        if (self.model_name in POSE_MODEL_NAMES
-                and len(filter_pose_records(rows, manifest=self.data.manifest)) != len(rows)):
-            raise ValueError("Selected samples include pose-ineligible rows; select a pose model first")
+        rows = self.prepare_records(records)
         if not rows:
             return []
         dataset = make_dataset(self.model_name, rows, self.config, training=False)
@@ -277,12 +339,12 @@ class ModelExplorer:
                     raise ValueError("Model produced non-finite logits")
                 probabilities = logits.softmax(dim=1).cpu()
                 for offset, values in enumerate(probabilities.tolist()):
-                    metadata = self.data.describe(rows[first + offset])
+                    metadata = self.data.describe(rows[first + offset]["image"])
                     # Stable ties match argmax in the project's evaluator.
                     ranked = sorted(range(len(values)), key=lambda index: (-values[index], index))
                     predicted = self.class_names[ranked[0]]
                     result.append({
-                        **metadata, "predicted": predicted,
+                        **metadata, "predicted": predicted, "pose_source": self.pose_source,
                         "correct": predicted == metadata["actual"],
                         "probabilities": values,
                         "top_k": [{"class_name": self.class_names[index],

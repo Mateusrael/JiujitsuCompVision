@@ -6,6 +6,7 @@ import torch
 
 from src.Dataset.annotations import load_annotations
 from src.Loader.splits import read_manifest
+from src.Loader.pose_source import resolve_pose_data
 from src.Modules.models import build_model
 from src.Modules.execution import compile_model, validate_compile_settings
 from src.Train.checkpoints import load_checkpoint
@@ -41,7 +42,9 @@ def evaluate(args):
     if config["batch_size"] < 1 or config["workers"] < 0:
         raise ValueError("batch-size must be positive and workers nonnegative")
     device = resolve_device(args.device)
+    records, manifest = resolve_pose_data(records, manifest, config)
     selected_records, sample_counts = select_model_records(config["model"], records, manifest, "test")
+    sample_counts["samples"] = len(selected_records)
     evaluation_types = evaluation_types_for_records(selected_records, manifest)
     dataset = make_dataset(config["model"], selected_records, config)
     loader = make_loader(dataset, config, device,
@@ -60,6 +63,12 @@ def evaluate(args):
               "split_sha256": config["split_sha256"], "label_map": config["label_map"],
               "split_method": manifest["split_method"],
               "pose_filter": config.get("pose_filter", "not_applicable"),
+              "pose_detections": config.get("pose_detections"),
+              "pose_detections_scope": config.get("pose_detections_scope", "train"),
+              "pose_detections_sha256": config.get("pose_detections_sha256"),
+              "evaluation_pose_source": ("not_applicable" if config["model"].startswith("image") else
+                                         "detected" if config.get("pose_detections_scope") == "all"
+                                         else "annotations"),
               "sample_counts": sample_counts,
               "evaluation_scope": manifest.get("evaluation_scope", "Held-out recording groups."),
               "metrics": metrics, "provenance": provenance(torch, device)}

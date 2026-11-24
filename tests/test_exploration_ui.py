@@ -108,6 +108,39 @@ class ExplorationUITests(unittest.TestCase):
             predictor.sample(exact=True)
         self.assertEqual([r["image"] for r in predictor.records], ["0100003"])
 
+    def test_detected_sample_preview_and_overlay_use_checkpoint_inputs(self):
+        import torch
+        import matplotlib.pyplot as plt
+        from src.Dataset.annotations import sha256_file
+        from src.Eval.exploration_ui import plot_predictions
+        from src.Loader.pose import pose_features
+        from tests.test_exploration import detected_cache
+
+        cache, poses = detected_cache(self.root, self.data)
+        payload = torch.load(self.checkpoint, weights_only=False)
+        payload["config"].update(pose_detections=str(cache), pose_detections_scope="all",
+                                 pose_detections_sha256=sha256_file(cache))
+        torch.save(payload, self.checkpoint)
+        _, predictor = self.browsers()
+        predictor.load()
+        predictor.count.value = 12
+        predictor.sample()
+        self.assertEqual({row["frame"] for row in predictor.records}, {0, *range(4, 10)})
+        predictor.image_id.value = "0100000"
+        predictor.sample(exact=True)
+        self.assertEqual([row["image"] for row in predictor.records], ["0100000"])
+        predictor.show_input()
+        selected = predictor.sample_id.value
+        torch.testing.assert_close(predictor.last_input_tensor,
+                                   torch.tensor(pose_features(*poses[selected])))
+        figure = plot_predictions(self.data, predictor.records[:1], predictor.predictions[:1],
+                                  session=predictor.session)
+        self.assertIn("Poses: detected", figure.axes[0].get_title())
+        first_pose = poses[predictor.records[0]["image"]][0]
+        self.assertEqual(figure.axes[0].collections[0].get_offsets().tolist(),
+                         [joint[:2] for joint in first_pose])
+        plt.close(figure)
+
     def test_prediction_callbacks_publish_complete_pngs_and_replace_old_results(self):
         from PIL import Image, ImageStat
         import matplotlib.pyplot as plt

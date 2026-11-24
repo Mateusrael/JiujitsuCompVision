@@ -17,6 +17,7 @@ from src.Dataset.annotations import load_annotations, sha256_file
 from src.Eval.metrics import classification_metrics
 from src.Loader.datasets import ImageDataset, PoseDataset
 from src.Loader.pose import with_detected_poses
+from src.Loader.pose_source import resolve_pose_data
 from src.Loader.splits import filter_pose_records, read_manifest, split_records
 from src.Modules.execution import compile_model
 from src.Modules.models import architecture_config, build_model
@@ -53,6 +54,9 @@ def select_model_records(model, records, manifest, partition):
     eligible = filter_pose_records(original, manifest=manifest) if model in POSE_MODEL_NAMES else original
     counts = {"original": len(original), "eligible": len(eligible),
               "removed": len(original) - len(eligible)}
+    if "class_names" in manifest and "label_map" in manifest:
+        by_class = Counter(manifest["label_map"][row["position"]] for row in eligible)
+        counts["class_counts"] = {name: by_class[name] for name in manifest["class_names"]}
     if model in POSE_MODEL_NAMES and "pose_exclusion_reasons" in manifest:
         eligible_ids = {record["image"] for record in eligible}
         counts["removed_by_reason"] = dict(Counter(
@@ -330,6 +334,10 @@ def train(args):
     loaders = {}
     validation_types = None
     config["sample_counts"] = {}
+    records, manifest = resolve_pose_data(records, manifest, config)
+    if config["pose_detections_scope"] == "all":
+        print(f"Pose inputs in train/val/test: {config['pose_detections']} "
+              "(two detected athletes; shared image split, independent of supplied poses)", flush=True)
     for part in ("train", "val", "test"):
         selected_records, counts = select_model_records(args.model, records, manifest, part)
         counts["samples"] = len(selected_records)
@@ -340,7 +348,8 @@ def train(args):
             continue
         if part == "val":
             validation_types = evaluation_types_for_records(selected_records, manifest)
-        if part == "train" and config["pose_detections"]:
+        if (part == "train" and config["pose_detections"]
+                and config["pose_detections_scope"] == "train"):
             annotated_count = len(selected_records) if config["pose_keep_annotated"] else 0
             selected_records = with_detected_poses(selected_records, config["pose_detections"],
                                                    keep_annotated=config["pose_keep_annotated"],

@@ -14,11 +14,12 @@ DEFAULTS = {"epochs": 20, "batch_size": 128, "lr": 0.001, "weight_decay": 0.0001
             "swap_athletes": True, "horizontal_flip_prob": 0.0, "dropout": 0.0,
             "pose_joint_noise": 0.0, "pose_joint_dropout": 0.0, "pose_athlete_dropout": 0.0,
             "pose_detections": None, "pose_keep_annotated": False,
+            "pose_detections_scope": "train",
             "compile": False, "compile_mode": "default", "progress": True}
 RESUME_FIXED = ("batch_size", "lr", "weight_decay", "workers", "seed", "pretrained",
                 "fine_tune", "swap_athletes", "horizontal_flip_prob", "dropout",
                 "pose_joint_noise", "pose_joint_dropout", "pose_athlete_dropout",
-                "pose_detections", "pose_keep_annotated")
+                "pose_detections", "pose_keep_annotated", "pose_detections_scope")
 ATTENTION_DEFAULTS = {"attention_dim": 128, "attention_heads": 4, "attention_layers": 4,
                       "attention_mlp_dim": 512, "attention_dropout": 0.0,
                       "attention_mlp_dropout": 0.0,
@@ -111,6 +112,13 @@ def resolve_settings(args, previous=None):
         raise ValueError("--pose-detections applies only to pose models")
     if resolved["pose_keep_annotated"] and not resolved["pose_detections"]:
         raise ValueError("--pose-keep-annotated requires --pose-detections")
+    if resolved["pose_detections_scope"] not in ("train", "all"):
+        raise ValueError("--pose-detections-scope must be train or all")
+    if resolved["pose_detections_scope"] == "all":
+        if not resolved["pose_detections"]:
+            raise ValueError("--pose-detections-scope all requires --pose-detections")
+        if resolved["pose_keep_annotated"]:
+            raise ValueError("--pose-keep-annotated is supported only with detection scope train")
     if args.model == "pose-attention":
         for name in ("attention_dim", "attention_heads", "attention_layers", "attention_mlp_dim"):
             value = resolved[name]

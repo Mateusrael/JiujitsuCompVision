@@ -56,9 +56,11 @@ def build_parser():
     parser.add_argument("--pose-athlete-dropout", type=float,
                         help="Training pose models: probability of removing one athlete; fresh default: 0")
     parser.add_argument("--pose-detections",
-                        help="Training pose models: JSONL of detected poses replacing the annotated "
-                             "ones in the train split; validation stays annotated")
-    parser.add_argument("--pose-keep-annotated", action="store_true", default=None,
+                        help="Pose cache JSONL; see --pose-detections-scope for affected partitions")
+    parser.add_argument("--pose-detections-scope", choices=("train", "all"),
+                        help="Default train: replace training inputs only; all: use detected poses "
+                             "in train/val/test, requiring both detected athletes")
+    parser.add_argument("--pose-keep-annotated", action=argparse.BooleanOptionalAction, default=None,
                         help="With --pose-detections: train on annotated and detected poses together")
     parser.add_argument("--horizontal-flip-prob", type=float,
                         help="Training-only horizontal mirror probability for poses/images; default: 0 (off)")

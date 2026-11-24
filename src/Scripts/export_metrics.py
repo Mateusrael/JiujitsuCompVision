@@ -19,7 +19,8 @@ RESUME_NAME = re.compile(r"config_resume_epoch(\d+)_(.+)\.json\Z")
 SETTINGS = ("model", "lr", "weight_decay", "dropout", "attention_dropout",
             "attention_mlp_dropout", "horizontal_flip_prob", "batch_size", "seed",
             "fine_tune", "image_training", "compile", "annotation_sha256", "split_sha256", "pose_filter",
-            "checkpoint_selection")
+            "checkpoint_selection", "pose_detections", "pose_detections_scope",
+            "pose_detections_sha256", "pose_keep_annotated")
 EVALUATION_TYPES = ("held_out_view", "unseen_moment")
 GROUP_SCORES = ("accuracy", "loss", "macro_f1", "samples")
 GROUP_SUMMARY_FIELDS = tuple(f"{stage}_val_{kind}_{score}"

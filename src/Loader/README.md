@@ -36,23 +36,41 @@ default. `perturb_pose` normalizes the degraded pose again; evaluation never use
 `--pose-detections` replaces the annotated poses of the train split with a detector's
 JSONL cache (`with_detected_poses`); `--pose-keep-annotated` trains on both. Validation
 and test stay annotated, so checkpoint selection does not change.
+Add `--pose-detections-scope all` for detector-only train/validation/test inputs.
+This mode requires two observed detected poses and starts from the original image
+assignments, independently of supplied-pose completeness. Held-out views must have
+a same-class training-camera counterpart with two detected poses. The policy can
+recover missing supplied poses and previously unpaired views; it can also exclude
+new detector failures. Main split assignments and buffers remain unchanged.
+It cannot be combined with `--pose-keep-annotated`. Evaluation and notebook input
+inspection use the saved source and verify the cache checksum.
 Cache rows contain a unique `image` string and `poses`, a list of zero to two
 17-joint poses with finite `[x, y, confidence]` values. Additional detector metadata
-is allowed. Every eligible training frame must have a row; empty detections omit
-the detected copy, while one detected athlete leaves the second slot empty.
-The annotation eligibility filter runs before this replacement. The cache SHA-256
+is allowed. In the legacy `train` scope, every supplied-pose-eligible training frame
+must have a row; empty detections omit the detected copy, while one detected athlete
+leaves the second slot empty. That scope applies the supplied-pose eligibility filter
+before replacement. Scope `all` requires rows for every original image, preserves
+empty results for coverage auditing, then excludes images without two observed
+detected athletes and held-out views without detected training witnesses. The cache SHA-256
 is saved with the run and checked again on resume and when consuming its rows;
 changed caches and cache-trained checkpoints without a saved hash cannot resume.
-`sample_counts` retains `original`, `eligible` and `removed` annotation counts;
+`sample_counts` retains `original` image assignment counts and the selected source's
+`eligible` and `removed` counts;
 `samples` records the actual population after detection replacement or mixing.
-Detection training additionally reports `annotated_samples`, `detected_samples`
+Legacy train-only replacement additionally reports `annotated_samples`, `detected_samples`
 and `frames_without_detection`.
 `pose`, `pose-wide` and `pose-attention` all use this dataset and its `(B, 102)`
 batch contract. The attention model reshapes the features into 34 joint tokens
 inside the model; it does not introduce a separate feature pipeline. All three
-pose training/evaluation entry points remove annotations missing either athlete's
-observed pose; training detector copies may contain only one detected athlete.
+pose models use the same source policy: supplied-pose runs require both supplied
+athletes; scope `all` requires both detected athletes regardless of supplied poses;
+legacy train-only detector copies may contain only one detected athlete.
 Confidence <= 0 still supplies the attention model's joint mask.
+
+The [queue preflight](../../docs/detected_pose_training.md) reports full-cache
+recovery, independent gains/losses against the supplied-pose baseline, per-split
+class counts, evaluation groups, and effective 80/10/10 proportions/deviations.
+Its absent-class and imbalance flags are descriptive; it never reallocates images.
 
 `datasets.ImageDataset` requires exactly one `<image>.jpg`, `.jpeg`, or `.png`
 directly under the supplied image directory. It resizes the entire frame with

@@ -1,11 +1,12 @@
 """Explicit run selection and comparisons for the model explorer notebook."""
 
 from pathlib import Path
+import random
 
 from src.Eval.exploration_ui import (
     _new_output, _notebook_dependencies, _set_output_text, _show_figure,
 )
-from src.Modules.registry import MODEL_NAMES, POSE_MODEL_NAMES
+from src.Modules.registry import MODEL_NAMES
 
 
 def _run_label(row):
@@ -209,15 +210,27 @@ class PredictionComparisonBrowser:
                 for key in ("annotation_sha256", "split_sha256"):
                     if row.get(key) != getattr(self.data, key):
                         raise ValueError(f"{row['run_name']} does not match the loaded data's {key}")
-            population = "pose" if any(row["model"] in POSE_MODEL_NAMES for row in selected) else "image"
-            self.records = self.data.sample(population, split=self.split.value,
-                                             evaluation_type=self.cohort.value,
-                                             count=self.count.value, seed=self.seed.value)
+            shared = None
+            for name in names:
+                eligible = ModelExplorer.select_from_run(
+                    self.selector.trainings_dir / name, self.data,
+                    checkpoint=self.checkpoint.value, split=self.split.value,
+                    evaluation_type=self.cohort.value)
+                ids = {row["image"] for row in eligible}
+                shared = ids if shared is None else shared & ids
+            candidates = [row for row in self.data.select(
+                "image", split=self.split.value, evaluation_type=self.cohort.value)
+                if row["image"] in shared]
+            if not candidates:
+                raise ValueError("No common eligible samples remain for the selected checkpoints")
+            self.records = random.Random(self.seed.value).sample(
+                candidates, min(self.count.value, len(candidates)))
             if self.predictor is not None:
                 self.predictor.close()
             ids = ", ".join(row["image"] for row in self.records)
             _set_output_text(self.output, f"Shared {self.split.value} frames: {ids}\n"
-                             f"Eligibility: {population}. This sample is for inspection, not a model ranking.")
+                             "Eligibility: intersection of selected checkpoints. "
+                             "This sample is for inspection, not a model ranking.")
             for name in names:
                 self.output.append_stdout(f"\nLoading {name}...\n")
                 session = ModelExplorer.from_run(self.selector.trainings_dir / name, self.data,
@@ -226,15 +239,15 @@ class PredictionComparisonBrowser:
                 try:
                     predictions = session.predict(self.records, top_k=3, batch_size=16)
                     epoch = session.checkpoint_epoch
+                    self.predictions[name] = predictions
+                    self.output.append_stdout(f"{name} | checkpoint epoch {epoch}\n")
+                    # Keep each model's actual poses visible on the shared frames.
+                    for record, prediction in zip(self.records, predictions):
+                        figure = plot_predictions(self.data, [record], [prediction],
+                                                   overlay=self.overlay.value, session=session)
+                        _show_figure(self.output, figure)
                 finally:
                     session.close()
-                self.predictions[name] = predictions
-                self.output.append_stdout(f"{name} | checkpoint epoch {epoch}\n")
-                # Separate figures keep each sample readable in long widget outputs.
-                for record, prediction in zip(self.records, predictions):
-                    figure = plot_predictions(self.data, [record], [prediction],
-                                               overlay=self.overlay.value)
-                    _show_figure(self.output, figure)
         except (OSError, ValueError, RuntimeError, KeyError, ImportError) as error:
             self.output.append_stderr(f"\n{type(error).__name__}: {error}\n")
         finally:

@@ -21,7 +21,7 @@ class QueuePlanTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         for name in ("annotations.json", "split.json"):
             (self.root / name).write_text("{}")
         (self.root / "images").mkdir()
@@ -50,6 +50,17 @@ class QueuePlanTests(unittest.TestCase):
         self.assertEqual(job["command"].count("--lr"), 1)
         self.assertEqual(job["command"][job["command"].index("--lr") + 1], "1e-05")
         self.assertEqual(job["min_free_mib"], 16384)
+
+    def test_detection_cache_is_a_project_relative_path_and_boolean_option(self):
+        self.source["defaults"].update(pose_detections="poses.jsonl", pose_detections_scope="all",
+                                       pose_keep_annotated=False)
+        with self.assertRaises(FileNotFoundError):
+            self.prepare()
+        (self.root / "poses.jsonl").touch()
+        command = self.prepare()["jobs"][0]["command"]
+        self.assertEqual(command[command.index("--pose-detections") + 1],
+                         str(self.root / "poses.jsonl"))
+        self.assertIn("--no-pose-keep-annotated", command)
 
     def test_resume_restores_own_run_and_cannot_be_duplicated(self):
         checkpoint = self.root / "previous" / "checkpoints" / "last.pt"

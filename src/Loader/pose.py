@@ -83,13 +83,14 @@ def _validate_detection_row(row, line_number):
 
 
 def with_detected_poses(records, detections_path, *, keep_annotated=False,
-                        expected_sha256=None):
+                        expected_sha256=None, include_empty=False):
     """Return records whose poses come from a detector's JSONL cache.
 
     Each cache row holds an image id and up to two detected poses. Frames with no
     detected person are dropped; a lone athlete leaves the second slot empty. With
     keep_annotated, the annotated records stay and the detected copies are added.
     When supplied, expected_sha256 checks the exact bytes consumed by this loader.
+    include_empty retains zero-detection frames with two empty slots for auditing.
     """
     wanted = {record["image"] for record in records}
     poses = {}
@@ -114,7 +115,7 @@ def with_detected_poses(records, detections_path, *, keep_annotated=False,
     if absent:
         raise ValueError(f"{len(absent)} frames have no cached detection, "
                          f"e.g. {sorted(absent)[:3]}")
-    detected = [{**record, "pose1": poses[record["image"]][0],
-                 "pose2": (poses[record["image"]] + [None])[1]}
-                for record in records if poses[record["image"]]]
+    detected = [{**record, "pose1": (poses[record["image"]] + [None])[0],
+                 "pose2": (poses[record["image"]] + [None, None])[1]}
+                for record in records if include_empty or poses[record["image"]]]
     return [*records, *detected] if keep_annotated else detected

@@ -11,7 +11,7 @@ from src.Train.config import resolve_settings
 
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-PATH_ARGUMENTS = {"annotations", "split", "images_dir", "resume", "init_from"}
+PATH_ARGUMENTS = {"annotations", "split", "images_dir", "resume", "init_from", "pose_detections"}
 
 
 def identifier(value):

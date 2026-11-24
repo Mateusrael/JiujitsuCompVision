@@ -112,6 +112,14 @@ class PredictionComparisonTests(unittest.TestCase):
         self.events = []
         self.predictor = Mock()
         self.predictor.close.side_effect = lambda: self.events.append("unload-existing")
+        selection_patch = patch("src.Eval.exploration.ModelExplorer.select_from_run",
+                                side_effect=self.fake_selection)
+        self.selection = selection_patch.start()
+        self.addCleanup(selection_patch.stop)
+
+    def fake_selection(self, run_path, data, *, checkpoint, **filters):
+        model = "pose" if run_path.name.startswith("pose") else "image"
+        return data.select(model, **filters)
 
     def browser(self):
         from src.Eval.exploration_compare_ui import PredictionComparisonBrowser
@@ -127,6 +135,8 @@ class PredictionComparisonTests(unittest.TestCase):
         name = run_path.name
         self.events.append(("load", name, kwargs))
         session = Mock(checkpoint_epoch=7)
+        session.pose_source = "annotations"
+        session.draw_pose.side_effect = data.draw_pose
 
         def predict(records, **_):
             self.events.append(("predict", name, id(records), tuple(row["image"] for row in records)))
@@ -192,12 +202,46 @@ class PredictionComparisonTests(unittest.TestCase):
         browser.split.value = "train"
         self.assertIsNone(browser.cohort.value)
         self.assertTrue(browser.cohort.disabled)
-        with patch.object(self.data, "sample", wraps=self.data.sample) as sample, \
+        with patch.object(self.data, "select", wraps=self.data.select) as select, \
                 patch("src.Eval.exploration.ModelExplorer.from_run", side_effect=self.fake_session):
             browser.compare()
-        self.assertEqual(sample.call_args.args, ("image",))
-        self.assertEqual(sample.call_args.kwargs["split"], "train")
-        self.assertIsNone(sample.call_args.kwargs["evaluation_type"])
+        self.assertEqual(select.call_args.args, ("image",))
+        self.assertEqual(select.call_args.kwargs["split"], "train")
+        self.assertIsNone(select.call_args.kwargs["evaluation_type"])
+
+    def test_checkpoint_populations_are_intersected_before_sampling(self):
+        browser = self.browser()
+        browser.count.value = 3
+        eligible = {"pose-a": {"0100000", "0100001", "0100004", "0100005"},
+                    "image-a": {"0100000", "0100004", "0100005"}}
+        self.selection.side_effect = lambda run_path, data, **_: [
+            row for row in data.records if row["image"] in eligible[run_path.name]]
+        with patch("src.Eval.exploration.ModelExplorer.from_run", side_effect=self.fake_session):
+            browser.compare()
+        self.assertEqual({row["image"] for row in browser.records},
+                         {"0100000", "0100004", "0100005"})
+        self.assertEqual(set(browser.predictions), {"pose-a", "image-a"})
+        eligible["image-a"] = {"0100002"}
+        with patch("src.Eval.exploration.ModelExplorer.from_run") as load:
+            browser.compare()
+        load.assert_not_called()
+        self.assertIn("No common eligible", output_text(browser.output))
+
+    def test_annotation_and_detected_models_use_their_own_eligibility(self):
+        self.rows.append(catalog_row("pose-annotations",
+                                     annotation_sha256=self.data.annotation_sha256,
+                                     split_sha256=self.data.split_sha256))
+        browser = self.browser()
+        browser.count.value = 3
+        eligible = {"pose-a": {"0100000", "0100004", "0100005"},
+                    "image-a": {"0100000", "0100004", "0100005"},
+                    "pose-annotations": {"0100004", "0100005"}}
+        self.selection.side_effect = lambda run_path, data, **_: [
+            row for row in data.records if row["image"] in eligible[run_path.name]]
+        with patch("src.Eval.exploration.ModelExplorer.from_run", side_effect=self.fake_session):
+            browser.compare()
+        self.assertEqual({row["image"] for row in browser.records}, {"0100004", "0100005"})
+        self.assertEqual(set(browser.predictions), set(eligible))
 
 
 if __name__ == "__main__":

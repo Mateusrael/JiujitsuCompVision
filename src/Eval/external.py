@@ -207,7 +207,8 @@ class ExternalClassifier:
             "model_config": self.config["model_config"], "device": str(self.device),
             "training_data_identity": {key: self.config.get(key) for key in (
                 "annotations", "annotation_sha256", "split", "split_sha256", "pose_filter",
-                "pose_detections", "pose_detections_sha256", "pose_keep_annotated")},
+                "pose_detections", "pose_detections_sha256", "pose_detections_scope",
+                "pose_keep_annotated")},
             "external_data_hash_matching": "not_applicable_to_explicit_external_evaluation",
             "class_names": self.class_names,
         }

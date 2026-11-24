@@ -123,20 +123,29 @@ resume without repeating inference.
 
 Extraction includes training, validation, test, excluded/buffer frames, and images
 with missing supplied athlete poses. It does **not** change class labels, split
-assignments, or training eligibility. Full caches can be reused for different
+assignments, or buffers. Full caches can be reused for different
 classifiers without rerunning the detectors.
 
 For a new pose training, use either completed cache:
 
 ```bash
 bash launchers/START_TRAINING.sh --model pose-wide \
-  --pose-detections Data/pose_detections/full_dataset/yolo.jsonl
+  --pose-detections Data/pose_detections/full_dataset/yolo.jsonl \
+  --pose-detections-scope all
 ```
 
-Use `vitpose.jsonl` for ViTPose inputs. The current `--pose-detections` option changes
-**training inputs only**; epoch validation and final test still use supplied poses.
-Use the [pose-source comparison](external_evaluation.md) to evaluate saved
-classifiers with detected poses as well. Training still follows the selected
-split and its existing supplied-pose eligibility rules; extracting every image does
-not add buffer frames to training. Do not train from an unfinished or changing cache:
-training and checkpoint resume verify its SHA-256.
+Use `vitpose.jsonl` for ViTPose inputs. With `--pose-detections-scope all`, training,
+epoch validation and final test use the same detector. They require two detected
+athletes within the original image assignments, regardless of supplied-pose
+completeness. Held-out views also need a same-class training-camera counterpart
+with two detected athletes; this can recover views previously excluded by missing
+supplied poses. No temporal sections move, and no buffer frames enter training.
+Without the scope flag, the legacy behavior
+changes training inputs only and keeps supplied-pose validation/test.
+
+The [detected-pose training preparation](detected_pose_training.md) verifies both
+completed caches, reports recovered coverage and effective overall/per-class
+80/10/10 split proportions, and creates a matched training queue. Balance flags
+do not redistribute images; review them after extraction finishes.
+Do not train from an unfinished or changing cache: training, evaluation and
+checkpoint resume verify its SHA-256.
