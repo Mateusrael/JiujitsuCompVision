@@ -37,6 +37,10 @@ ViTPose can receive YOLO26 work instead. Defaults require **8,192 MiB free for
 ViTPose** or **2,048 MiB for YOLO26** before loading a model. These are scheduling
 thresholds, not reservations or guarantees; other jobs may change GPU memory
 availability. No GPU number is permanently restricted to either model.
+Once a model is loaded, its worker keeps taking chunks for that detector until
+there are none pending or it fails. The cold-load memory threshold is not
+reapplied between successful chunks, and fluctuating memory does not preempt
+a working YOLO model to load ViTPose.
 
 To customize the configuration for a new queue:
 

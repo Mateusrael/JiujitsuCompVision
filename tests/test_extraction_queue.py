@@ -120,6 +120,33 @@ class ExtractionSchedulingTests(unittest.TestCase):
         self.assertEqual(worker["status"], "busy")
         self.assertEqual(worker["detector"], "vitpose")
 
+    def test_yolo_stays_loaded_below_cold_start_threshold_after_success(self):
+        self.gpus = [gpu(0, 2100)]
+        self.manager.step()
+        self.ready()
+        worker = self.manager.state["workers"][0]
+        self.assertEqual(worker["detector"], "yolo")
+        # Some CUDA memory belongs to context/libraries, not torch's allocator.
+        self.gpus = [gpu(0, 700)]
+        for _ in range(3):
+            self.reply(worker, "done", reserved_mib=900, summary={"images": 1})
+            self.manager.step()
+            self.assertEqual(worker["status"], "busy")
+            self.assertTrue(worker["job_id"].startswith("yolo-"))
+        self.assertEqual(len(self.processes), 1)
+
+    def test_memory_recovery_does_not_preempt_healthy_yolo_worker(self):
+        self.gpus = [gpu(0, 3000)]
+        self.manager.step()
+        self.ready()
+        worker = self.manager.state["workers"][0]
+        self.gpus = [gpu(0, 20000)]
+        self.reply(worker, "done", summary={"images": 1})
+        self.manager.step()
+        self.assertEqual(worker["detector"], "yolo")
+        self.assertEqual(worker["status"], "busy")
+        self.assertEqual(len(self.processes), 1)
+
     def test_oom_requeues_chunk_and_falls_back_to_yolo_on_same_gpu(self):
         self.gpus = [gpu(0)]
         self.manager.step()
@@ -203,6 +230,10 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(choose_detector(pending, 8192, minimum), "vitpose")
         self.assertEqual(choose_detector(pending, 20000, minimum, blocked={"vitpose"}), "yolo")
         self.assertEqual(choose_detector({"yolo": 1, "vitpose": 0}, 20000, minimum), "yolo")
+        self.assertEqual(choose_detector(pending, 0, minimum, resident="yolo"), "yolo")
+        self.assertEqual(choose_detector(pending, 20000, minimum, resident="yolo"), "yolo")
+        self.assertEqual(choose_detector({"yolo": 0, "vitpose": 1}, 20000, minimum,
+                                         resident="yolo"), "vitpose")
 
 
 if __name__ == "__main__":

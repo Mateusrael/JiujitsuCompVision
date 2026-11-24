@@ -54,11 +54,14 @@ def prepare_plan(directory, annotations, images_dir, *, chunk_size=256, max_para
 
 def choose_detector(pending, free_mib, minimums, *, resident=None, reserved_mib=0,
                     blocked=()):
-    """Prefer ViTPose when it fits, otherwise run YOLO on that same GPU.
+    """Keep a resident model working; use memory thresholds for fresh loads only.
 
-    Telemetry excludes the resident model's CUDA cache, so add only this worker's
-    reported reservation back when comparing the requirements of a fresh load.
+    CUDA context/library allocations are not all included in memory_reserved().
+    Rechecking the cold-load threshold after a successful chunk can therefore
+    repeatedly unload a healthy worker. Actual OOMs use the normal retry path.
     """
+    if resident in DETECTORS and pending.get(resident, 0) > 0 and resident not in blocked:
+        return resident
     available = free_mib + max(0, reserved_mib if resident else 0)
     return next((name for name in DETECTORS if pending.get(name, 0) > 0
                  and name not in blocked and available >= minimums[name]), None)
