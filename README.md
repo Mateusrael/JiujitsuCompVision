@@ -28,6 +28,9 @@ test existing checkpoints on the new image set, or compare the same pose
 classifier using supplied annotations, YOLO detections and ViTPose detections.
 These evaluations do not retrain or modify the checkpoints.
 
+Use the [full-dataset pose extraction queue](docs/pose_extraction_queue.md) to
+cache YOLO26 and ViTPose outputs across available GPUs for detected-pose training.
+
 ```text
 install/        environment probe and Linux dependency setup
 launchers/      editable paths and commands to run common operations

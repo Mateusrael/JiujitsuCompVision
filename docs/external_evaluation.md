@@ -136,6 +136,10 @@ assignment. The classifiers' existing athlete-swap augmentation is unchanged.
 
 ## Detection caches and optional retraining
 
+For both detectors on every annotated image, use the
+[full-dataset extraction queue](pose_extraction_queue.md). It distributes chunks
+as GPUs become available and merges verified caches for training.
+
 Detection files contain image IDs, image SHA-256, raw poses and elapsed time;
 sidecars record detector settings, package versions and weight identity. Output
 directories are created automatically. Rerunning resumes an interrupted
