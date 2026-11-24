@@ -22,7 +22,7 @@ DEDUPE_IOU = 0.85
 def detector_config(name):
     common = {"schema_version": 1, "keypoints": "COCO-17", "max_people": 2}
     if name == "yolo":
-        return {**common, "detector": name, "model": "yolo11x-pose.pt",
+        return {**common, "detector": name, "model": "yolo26x-pose.pt",
                 "confidence": 0.1, "image_size": 640,
                 "joint_confidence": 0.5, "low_confidence_joints": "zero_xyz"}
     if name == "vitpose":
@@ -50,7 +50,7 @@ class YoloDetector:
     def __init__(self, device):
         from ultralytics import YOLO
         self.device = str(device)
-        weights = ROOT / "Data" / "pose_detectors" / "yolo11x-pose.pt"
+        weights = ROOT / "Data" / "pose_detectors" / detector_config(self.name)["model"]
         weights.parent.mkdir(parents=True, exist_ok=True)
         self.model = YOLO(str(weights))
         self.provenance = {"weights_sha256": sha256_file(weights)}

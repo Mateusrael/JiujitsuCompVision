@@ -22,10 +22,16 @@ From the DGX project directory, after the normal bootstrap:
 .venv/bin/python -m pip install -r install/requirements-pose-detectors.txt
 ```
 
-The first uncached extraction downloads YOLO11x-pose and/or RT-DETR R50 plus
+The first uncached extraction downloads YOLO26x-pose and/or RT-DETR R50 plus
 ViTPose++ Huge. Hugging Face models use the normal `HF_HOME` cache; YOLO weights
 are stored in `Data/pose_detectors/`. Image-only evaluation and supplied-pose
 evaluation do not need these detector packages or downloads.
+
+YOLO26 requires Ultralytics 8.4 or later. After switching from YOLO11, use a
+new `--cache-dir` (for example, `diagnostics/pose_detectors/yolo26_cache`).
+Detector metadata records the model name and weights hash; old YOLO11 caches
+are rejected rather than reused as YOLO26 results. Existing reports and caches
+can be kept for comparison.
 
 Commands below use existing trusted project checkpoints. Replace `RUN_NAME`
 with a directory under `trainings`; repeat `--checkpoint` to compare more runs.
