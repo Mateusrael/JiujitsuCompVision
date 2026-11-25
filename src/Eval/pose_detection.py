@@ -196,6 +196,8 @@ def detect_records(name, records, image_path, cache_dir, device, progress=True):
     metadata = None
     if metadata_path.exists():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if "postprocessing" in metadata:
+            raise ValueError("Filtered caches are read-only; use --cache-only for comparison")
         if metadata.get("configuration") != config:
             raise ValueError(f"Detector configuration changed: {metadata_path}; choose a new cache directory")
     elif cache.exists() and cache.stat().st_size:

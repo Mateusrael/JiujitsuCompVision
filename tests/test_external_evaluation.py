@@ -109,6 +109,50 @@ class StubClassifier:
 
 @unittest.skipUnless(importlib.util.find_spec("PIL"), "requires Pillow")
 class PairedPoseComparisonTests(unittest.TestCase):
+    def test_filtered_cache_reports_coverage_and_paired_scores_without_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            annotations, images, _ = external_fixture(Path(directory))
+            data = ExternalData(annotations, images)
+            for accepted_count in (2, 0):
+                found = {}
+                for index, row in enumerate(data.records):
+                    accepted = index < accepted_count
+                    found[row["image"]] = {
+                        "image": row["image"], "poses": [row["pose1"], row["pose2"]] if accepted else [],
+                        "image_sha256": sha256_file(data.image_path(row)), "seconds": .1,
+                        "quality_filter": {"accepted": accepted, "reason": "accepted" if accepted else "unreliable_pose"},
+                    }
+                with (patch("src.Eval.pose_cache_filter.read_verified_cache_subset",
+                            return_value=(found, {"postprocessing": {"profile": "cached-pose-quality-v1"}})),
+                      patch("src.Eval.pose_detection.detect_records", side_effect=AssertionError("no extraction"))):
+                    report = compare_pose_sources(
+                        StubClassifier(), data.records, data.image_path, detector_names=["yolo"],
+                        cache_dir=directory, detection_device="cpu", progress=False, cache_only=True)
+                detector = report["detectors"]["yolo"]
+                self.assertTrue(report["cache_only"])
+                self.assertEqual(detector["all_frames"]["metrics"]["samples"], 4)
+                self.assertEqual(len(detector["accepted_frames"]["predictions"]), accepted_count)
+                audit = detector["quality_filter"]
+                self.assertEqual(audit["accepted_images"], accepted_count)
+                self.assertEqual(audit["rejected_images"], 4 - accepted_count)
+                self.assertEqual(audit["rejection_reasons"], {"unreliable_pose": 4 - accepted_count})
+                paired = detector["same_two_detected"]
+                self.assertEqual(paired["annotated"], paired["detected"])
+                self.assertEqual(len(paired["image_ids"]), accepted_count)
+                if not accepted_count:
+                    self.assertIsNone(detector["accepted_frames"]["metrics"])
+
+    def test_cache_only_refuses_changed_image_without_calling_detector(self):
+        with tempfile.TemporaryDirectory() as directory:
+            annotations, images, _ = external_fixture(Path(directory))
+            data = ExternalData(annotations, images)
+            found = {r["image"]: {"image_sha256": "0" * 64} for r in data.records}
+            with (patch("src.Eval.pose_cache_filter.read_verified_cache_subset", return_value=(found, {})),
+                  patch("src.Eval.pose_detection.detect_records", side_effect=AssertionError("no extraction")),
+                  self.assertRaisesRegex(ValueError, "image content differs")):
+                compare_pose_sources(StubClassifier(), data.records, data.image_path, detector_names=["yolo"],
+                                     cache_dir=directory, detection_device="cpu", progress=False, cache_only=True)
+
     def test_missing_detections_are_scored_and_comparison_cohorts_are_identical(self):
         with tempfile.TemporaryDirectory() as directory:
             annotations, images, _ = external_fixture(Path(directory))

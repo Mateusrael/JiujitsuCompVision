@@ -1,4 +1,4 @@
-"""Verify completed detector caches and prepare 24 paired pose-classifier runs."""
+"""Verify completed detector caches and prepare paired pose-classifier runs."""
 
 import argparse
 from collections import Counter
@@ -14,6 +14,7 @@ if __package__ in (None, ""):
 
 from src.Dataset.annotations import both_poses_present, load_annotations, sha256_file
 from src.Eval.pose_detection import detector_config, validate_detection
+from src.Eval.pose_cache_filter import validate_filtered_row, validate_postprocessing
 from src.Loader.splits import filter_pose_records, read_manifest, split_records
 from src.Train.queue_plan import prepare_plan
 from src.Train.run_metadata import write_json
@@ -21,7 +22,7 @@ from src.Train.run_metadata import write_json
 
 PROJECT = Path(__file__).resolve().parents[2]
 DETECTORS = ("yolo", "vitpose")
-SEEDS = (46, 47, 48)
+DEFAULT_SEEDS = (46,)
 TARGET_PROPORTIONS = {"train": .8, "val": .1, "test": .1}
 RECIPES = (
     ("pose", {"model": "pose", "epochs": 300, "weight_decay": 1e-4, "dropout": .3}),
@@ -42,8 +43,11 @@ def verify_cache(directory, name, records, annotation_sha256):
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     if not isinstance(metadata, dict) or metadata.get("complete") is not True:
         raise ValueError(f"{name}: cache is unfinished; finish extraction first")
-    expected = {"configuration": detector_config(name),
-                "annotation_sha256": annotation_sha256,
+    configuration = metadata.get("configuration")
+    if configuration != detector_config(name):
+        raise ValueError(f"{name}: detector configuration does not match the original extractor")
+    filter_profile = validate_postprocessing(name, metadata)
+    expected = {"annotation_sha256": annotation_sha256,
                 "population": "all_original_annotations", "images": len(records)}
     for key, value in expected.items():
         if metadata.get(key) != value:
@@ -52,28 +56,53 @@ def verify_cache(directory, name, records, annotation_sha256):
     seen = set()
     digest = hashlib.sha256()
     coverage = {"0": 0, "1": 0, "2": 0}
+    frame_reasons, pose_reasons = Counter(), Counter()
+    accepted = 0
+    input_poses = 0
+    discarded_joints = 0
     with path.open("rb") as handle:
         for line in handle:
             if not line.endswith(b"\n"):
                 raise ValueError(f"{name}: incomplete final cache row; finish extraction first")
             digest.update(line)
             row = json.loads(line)
-            validate_detection(row)
+            if filter_profile:
+                validate_filtered_row(row, name)
+            else:
+                validate_detection(row)
+                if any(key in row for key in ("quality_filter", "original_poses", "candidates", "selection")):
+                    raise ValueError(f"{name}: raw cache contains unexpected selection/filter metadata")
             image = row["image"]
             if image not in wanted or image in seen:
                 raise ValueError(f"{name}: unexpected or duplicate cache image {image}")
             seen.add(image)
             count = sum(any(joint[2] > 0 for joint in pose) for pose in row["poses"])
             coverage[str(count)] += 1
+            if filter_profile:
+                audit = row["quality_filter"]
+                accepted += int(audit["accepted"])
+                input_poses += audit["input_pose_count"]
+                if not audit["accepted"]:
+                    frame_reasons[audit["reason"]] += 1
+                for pose in audit["pose_quality"]:
+                    pose_reasons.update(pose["reasons"])
+                    discarded_joints += len(pose["discarded_joint_indices"])
     if seen != wanted:
         raise ValueError(f"{name}: incomplete full-dataset cache ({len(seen)}/{len(wanted)} images)")
     if digest.hexdigest() != metadata.get("cache_sha256"):
         raise ValueError(f"{name}: final cache SHA-256 does not match completed metadata")
     if coverage != metadata.get("coverage"):
         raise ValueError(f"{name}: final cache coverage does not match completed metadata")
+    audit = {"profile": filter_profile or "raw"}
+    if filter_profile:
+        audit.update(accepted_pairs=accepted, rejected_frames=len(seen) - accepted,
+                     input_poses=input_poses, discarded_joints=discarded_joints,
+                     frame_rejection_reasons=dict(sorted(frame_reasons.items())),
+                     pose_rejection_reasons=dict(sorted(pose_reasons.items())))
     return {"path": str(path.resolve()), "sha256": digest.hexdigest(),
             "configuration": metadata["configuration"], "images": len(seen),
-            "detected_people": coverage}
+            "postprocessing": metadata.get("postprocessing"),
+            "detected_people": coverage, "quality_filter": audit}
 
 
 def _class_counts(records, manifest):
@@ -154,21 +183,28 @@ def _portable_path(path, project_root):
         return str(path)
 
 
-def prepare_queue(cache_dir, annotations, split, *, project_root=PROJECT):
+def prepare_queue(cache_dir, annotations, split, *, project_root=PROJECT, seeds=DEFAULT_SEEDS):
     """Return the recipe and audited cohorts; no training or file writes occur."""
     from src.Loader.pose_source import resolve_pose_data
 
+    if (not isinstance(seeds, (list, tuple)) or not seeds
+            or any(type(seed) is not int or seed < 0 for seed in seeds)
+            or len(set(seeds)) != len(seeds)):
+        raise ValueError("seeds must be a nonempty sequence of unique nonnegative integers")
     project_root = Path(project_root).resolve()
     annotation_sha = sha256_file(annotations)
     split_sha = sha256_file(split)
     records = load_annotations(annotations)
     manifest = read_manifest(split, annotations, records)
-    report = {"schema_version": 2, "annotation_sha256": annotation_sha,
+    report = {"schema_version": 3, "annotation_sha256": annotation_sha,
               "split_sha256": split_sha, "split_method": manifest["split_method"],
               "checkpoint_selection": "pooled_validation_macro_f1",
-              "pose_detections_scope": "all", "seeds": list(SEEDS),
+              "pose_detections_scope": "all", "seeds": list(seeds),
               "detectors": {}, "common_cohort": {}}
     caches = {name: verify_cache(cache_dir, name, records, annotation_sha) for name in DETECTORS}
+    profiles = {cache["quality_filter"]["profile"] for cache in caches.values()}
+    if len(profiles) != 1:
+        raise ValueError("Detector filtering profiles differ; use both raw caches or both filtered caches")
     selected_ids = {}
     for name, cache in caches.items():
         config = {"model": "pose", "pose_detections": cache["path"],
@@ -222,7 +258,7 @@ def prepare_queue(cache_dir, annotations, split, *, project_root=PROJECT):
                 "pose_keep_annotated": False, "pose_joint_noise": 0.0,
                 "pose_joint_dropout": 0.0, "pose_athlete_dropout": 0.0}
     jobs = []
-    for seed in SEEDS:
+    for seed in seeds:
         for recipe, settings in RECIPES:
             for name in DETECTORS:
                 train = {**settings, "seed": seed,
@@ -240,6 +276,15 @@ def print_report(report):
     for name, detector in report["detectors"].items():
         print(f"{name}: {detector['images']} verified cache rows; "
               f"observed people 0/1/2 = {detector['detected_people']}")
+        quality = detector["quality_filter"]
+        print(f"  Cache filtering: {quality['profile']}")
+        if quality["profile"] != "raw":
+            print(f"  Cached-pose filter: {quality['accepted_pairs']} accepted pairs / "
+                  f"{quality['rejected_frames']} rejected frames from "
+                  f"{quality['input_poses']} existing poses; "
+                  f"{quality['discarded_joints']} unreliable/missing joint slots")
+            print("    frame rejection reasons: " + ", ".join(
+                f"{reason}={count}" for reason, count in quality["frame_rejection_reasons"].items()))
         full = detector["full_dataset_coverage"]
         print(f"  Full dataset: {full['detected_two_athletes']['samples']} detected pairs / "
               f"{full['supplied_two_athletes']['samples']} supplied pairs; "
@@ -275,10 +320,13 @@ def print_report(report):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache-dir", type=Path, default=PROJECT / "Data/pose_detections/full_dataset")
+    parser.add_argument("--cache-dir", type=Path,
+                        default=PROJECT / "Data/pose_detections/full_dataset_filtered")
     parser.add_argument("--annotations", type=Path, default=PROJECT / "Data/annotations.json")
     parser.add_argument("--split", type=Path, default=PROJECT / "Data/splits/multiview_sections_shifted.json")
     parser.add_argument("--output", type=Path, default=PROJECT / "launchers/detected-poses.local.json")
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS),
+                        help="Seeds to run; default: 46 (eight jobs). Use 46 47 48 for repeats")
     parser.add_argument("--dry-run", action="store_true", help="Run all preflight checks without saving files")
     return parser
 
@@ -286,7 +334,8 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
-        queue, report = prepare_queue(args.cache_dir, args.annotations, args.split, project_root=PROJECT)
+        queue, report = prepare_queue(args.cache_dir, args.annotations, args.split,
+                                      project_root=PROJECT, seeds=args.seeds)
         # Validate exact argv using the existing queue parser; this never starts a process.
         with tempfile.TemporaryDirectory(prefix="detected-poses-preflight-") as temporary:
             candidate = Path(temporary) / "queue.json"

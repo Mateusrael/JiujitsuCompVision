@@ -97,6 +97,8 @@ def build_parser():
     parser.add_argument("--detection-device", help="Default: same as --device")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--cache-dir", default=str(OUTPUT / "verified_cache"))
+    parser.add_argument("--cache-only", action="store_true",
+                        help="Read verified completed caches; never run a detector")
     parser.add_argument("--output-dir", default=str(OUTPUT))
     parser.add_argument("--report", help="Optional report filename (one checkpoint only)")
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
@@ -146,7 +148,7 @@ def main(argv=None):
                 classifier, records, data.image_path, detector_names=names,
                 cache_dir=args.cache_dir, detection_device=args.detection_device or args.device,
                 batch_size=args.batch_size, progress=args.progress,
-                reference_kind="original_dataset_supplied_poses")
+                reference_kind="original_dataset_supplied_poses", cache_only=args.cache_only)
             kinds = evaluation_types_for_records(records, data.manifest)
             if kinds:
                 result["by_evaluation_type"] = {}
@@ -161,6 +163,30 @@ def main(argv=None):
                         "detectors": {name: score_subset(result["detectors"][name]["all_frames"]["predictions"])
                                       for name in names},
                     }
+                    if args.cache_only:
+                        group = result["by_evaluation_type"][kind]
+                        group["detectors_policy"] = "forced all_frames diagnostic; report accepted coverage separately"
+                        group["accepted_detectors"] = {}
+                        for name in names:
+                            predictions = result["detectors"][name]["accepted_frames"]["predictions"]
+                            accepted_ids = ids & {p["image"] for p in predictions}
+                            accepted_records = [r for r in subset if r["image"] in accepted_ids]
+                            accepted_predictions = [p for p in predictions if p["image"] in ids]
+                            paired_ids = accepted_ids & {p["image"] for p in result["baseline"]["predictions"]}
+                            paired_records = [r for r in accepted_records if r["image"] in paired_ids]
+                            group["accepted_detectors"][name] = {
+                                "input_images": len(subset), "accepted_images": len(accepted_records),
+                                "metrics": score_predictions(accepted_records, accepted_predictions, classifier.class_names),
+                                "same_reference_frames": {
+                                    "image_ids": [r["image"] for r in paired_records],
+                                    "annotated": score_predictions(paired_records,
+                                        [p for p in result["baseline"]["predictions"] if p["image"] in paired_ids],
+                                        classifier.class_names),
+                                    "detected": score_predictions(paired_records,
+                                        [p for p in accepted_predictions if p["image"] in paired_ids],
+                                        classifier.class_names),
+                                },
+                            }
             report = {"evaluation": "original_split_pose_comparison", "checkpoint": str(path),
                       "checkpoint_sha256": classifier.checkpoint_sha256, "epoch": classifier.checkpoint_epoch,
                       "model": classifier.model_name, "annotations": str(data.annotations_path),
@@ -178,10 +204,15 @@ def main(argv=None):
                   f"{result['baseline']['metrics']['accuracy']:.4f}", flush=True)
             for name in names:
                 entry = result["detectors"][name]
-                metrics = entry["all_frames"]["metrics"]
+                cohort = "accepted_frames" if "quality_filter" in entry else "all_frames"
+                metrics = entry[cohort]["metrics"]
                 coverage = entry["coverage"]
-                print(f"{name}: accuracy {metrics['accuracy']:.4f}, macro F1 {metrics['macro_f1']:.4f}; "
+                score = (f"accuracy {metrics['accuracy']:.4f}, macro F1 {metrics['macro_f1']:.4f}"
+                         if metrics else "no accepted frames")
+                print(f"{name} ({cohort}): {score}; "
                       f"0/1/2 usable poses: {coverage['0']}/{coverage['1']}/{coverage['2']}", flush=True)
+                if "quality_filter" in entry:
+                    print(f"  Rejections: {entry['quality_filter']['rejection_reasons']}", flush=True)
         finally:
             classifier.close()
 

@@ -10,8 +10,9 @@ from unittest.mock import patch
 from src.Dataset.annotations import CLASS_NAMES_10, sha256_file
 from src.Dataset.splits import build_manifest
 from src.Eval.pose_detection import detector_config
+from src.Eval.pose_quality import filter_pose_pair, quality_config
 from src.Scripts.prepare_detected_pose_queue import (
-    _partition_counts, _split_balance, main, prepare_queue, verify_cache)
+    _partition_counts, _split_balance, build_parser, main, prepare_queue, verify_cache)
 from src.Train.queue_plan import prepare_plan
 
 
@@ -45,12 +46,21 @@ class DetectedPoseQueueTests(unittest.TestCase):
         for name in ("yolo", "vitpose"):
             self.write_cache(name)
 
-    def write_cache(self, name, *, missing=(), single=()):
+    def write_cache(self, name, *, missing=(), single=(), filtered=False):
         path = self.cache_dir / f"{name}.jsonl"
         rows = [{"image": row["image"],
                  "poses": [] if row["image"] in missing else
                           [self.pose] if row["image"] in single else [self.pose, self.pose],
                  "image_sha256": "a" * 64, "seconds": .01} for row in self.records]
+        if filtered:
+            xy = [(100, 80), (94, 76), (106, 76), (88, 82), (112, 82),
+                  (80, 120), (120, 120), (70, 160), (130, 160), (65, 200),
+                  (135, 200), (85, 200), (115, 200), (85, 260), (115, 260),
+                  (85, 320), (115, 320)]
+            poses = [[[x + shift, y, .9] for x, y in xy] for shift in (0, 120)]
+            for row in rows:
+                original = poses[:len(row["poses"])]
+                row.update(original_poses=original, **filter_pose_pair(original, detector=name))
         with path.open("w", encoding="utf-8", newline="\n") as handle:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
@@ -58,11 +68,19 @@ class DetectedPoseQueueTests(unittest.TestCase):
                     "population": "all_original_annotations", "images": len(rows),
                     "annotation_sha256": self.annotation_sha, "cache_sha256": sha256_file(path),
                     "coverage": {str(n): sum(len(row["poses"]) == n for row in rows) for n in range(3)}}
+        if filtered:
+            metadata.update(filtering_wall_seconds=.01,
+                            row_seconds_meaning="original_detector_inference")
+            metadata["postprocessing"] = {
+                "profile": "cached-pose-quality-v1", "configuration": quality_config(name),
+                "source_cache": str(self.root / "original" / f"{name}.jsonl"),
+                "source_cache_sha256": "b" * 64, "source_metadata_sha256": "c" * 64}
         path.with_suffix(".meta.json").write_text(json.dumps(metadata), encoding="utf-8")
         return path
 
-    def prepare(self):
-        return prepare_queue(self.cache_dir, self.annotations, self.split, project_root=self.root)
+    def prepare(self, **kwargs):
+        return prepare_queue(self.cache_dir, self.annotations, self.split,
+                             project_root=self.root, **kwargs)
 
     def change_metadata(self, name, **updates):
         path = self.cache_dir / f"{name}.meta.json"
@@ -72,7 +90,8 @@ class DetectedPoseQueueTests(unittest.TestCase):
 
     def test_recipe_pairs_detectors_and_recovers_missing_supplied_poses(self):
         queue, report = self.prepare()
-        self.assertEqual(len(queue["jobs"]), 24)
+        self.assertEqual(len(queue["jobs"]), 8)
+        self.assertEqual(report["seeds"], [46])
         self.assertEqual(queue["defaults"]["pose_detections_scope"], "all")
         self.assertFalse(queue["defaults"]["pose_keep_annotated"])
         self.assertEqual({job["train"]["model"] for job in queue["jobs"][:6]},
@@ -102,7 +121,7 @@ class DetectedPoseQueueTests(unittest.TestCase):
         plan_path = self.root / "queue.json"
         plan_path.write_text(json.dumps(queue), encoding="utf-8")
         resolved = prepare_plan(plan_path, self.root, "check")
-        self.assertEqual(len(resolved["jobs"]), 24)
+        self.assertEqual(len(resolved["jobs"]), 8)
         for job in resolved["jobs"]:
             self.assertIn("--no-pose-keep-annotated", job["command"])
             index = job["command"].index("--pose-detections")
@@ -153,7 +172,7 @@ class DetectedPoseQueueTests(unittest.TestCase):
     def test_absent_class_and_split_imbalance_warn_without_reallocating(self):
         self.write_cache("yolo", missing=("0200000", "0200001"))
         queue, report = self.prepare()
-        self.assertEqual(len(queue["jobs"]), 24)
+        self.assertEqual(len(queue["jobs"]), 8)
         detector = report["detectors"]["yolo"]
         self.assertEqual(detector["partitions"]["val"]["eligible"]["samples"], 18)
         balance = detector["split_balance"]
@@ -237,7 +256,7 @@ class DetectedPoseQueueTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(main(args), 0)
             self.assertIn("Start explicitly when ready", stdout.getvalue())
-        self.assertEqual(len(json.loads(output.read_text())["jobs"]), 24)
+        self.assertEqual(len(json.loads(output.read_text())["jobs"]), 8)
         self.assertTrue(output.with_name("detected-poses.preflight.local.json").is_file())
         self.assertFalse((self.root / "trainings").exists())
         previous = output.read_bytes()
@@ -246,6 +265,74 @@ class DetectedPoseQueueTests(unittest.TestCase):
             self.assertEqual(main(args), 1)
             self.assertIn("unfinished", stderr.getvalue())
         self.assertEqual(output.read_bytes(), previous)
+
+    def test_repeated_seeds_are_explicit_and_invalid_seeds_fail_before_cache_reads(self):
+        queue, report = self.prepare(seeds=(46, 47, 48))
+        self.assertEqual(len(queue["jobs"]), 24)
+        self.assertEqual(report["seeds"], [46, 47, 48])
+        self.assertEqual({job["train"]["seed"] for job in queue["jobs"]}, {46, 47, 48})
+        for invalid in ((), (46, 46), (-1,), (True,), "46"):
+            with self.subTest(seeds=invalid), self.assertRaisesRegex(ValueError, "seeds"):
+                self.prepare(seeds=invalid)
+        args = build_parser().parse_args([])
+        self.assertEqual(args.seeds, [46])
+        self.assertEqual(args.cache_dir.name, "full_dataset_filtered")
+        self.assertEqual(build_parser().parse_args(["--seeds", "46", "47", "48"]).seeds,
+                         [46, 47, 48])
+
+    def test_filtered_preflight_audits_rejections_and_preserves_assignments(self):
+        for name in ("yolo", "vitpose"):
+            self.write_cache(name, missing=("0200000",), single=("0200002",),
+                             filtered=True)
+        queue, report = self.prepare()
+        self.assertEqual(len(queue["jobs"]), 8)
+        for name in ("yolo", "vitpose"):
+            audit = report["detectors"][name]["quality_filter"]
+            self.assertEqual(audit["profile"], "cached-pose-quality-v1")
+            self.assertEqual(audit["accepted_pairs"], 58)
+            self.assertEqual(audit["rejected_frames"], 2)
+            self.assertEqual(audit["input_poses"], 117)
+            self.assertEqual(audit["discarded_joints"], 0)
+            self.assertEqual(sum(audit["frame_rejection_reasons"].values()), 2)
+            self.assertEqual(report["detectors"][name]["partitions"]["val"]["eligible"]["samples"], 18)
+        self.assertEqual(json.loads(self.split.read_text()), self.manifest)
+
+    def test_filtered_profile_cannot_relabel_raw_cache_or_mix_profiles(self):
+        self.write_cache("yolo", filtered=True)
+        with self.assertRaisesRegex(ValueError, "profiles differ"):
+            self.prepare()
+        self.write_cache("vitpose", filtered=True)
+        path = self.cache_dir / "yolo.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[0]["quality_filter"]["accepted"] = False
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        self.change_metadata("yolo", cache_sha256=sha256_file(path))
+        with self.assertRaisesRegex(ValueError, "filter|accepted|poses"):
+            self.prepare()
+
+        self.write_cache("yolo", filtered=True)
+        metadata = json.loads(path.with_suffix(".meta.json").read_text())
+        self.write_cache("yolo")
+        self.change_metadata("yolo", postprocessing=metadata["postprocessing"],
+                             filtering_wall_seconds=.01,
+                             row_seconds_meaning="original_detector_inference")
+        with self.assertRaisesRegex(ValueError, "filter|original_poses|poses"):
+            self.prepare()
+
+    def test_filtered_cache_requires_known_metadata_and_keeps_source_provenance(self):
+        for name in ("yolo", "vitpose"):
+            self.write_cache(name, filtered=True)
+        _, report = self.prepare()
+        original = report["detectors"]["yolo"]["postprocessing"]
+        self.assertEqual(original["source_cache_sha256"], "b" * 64)
+        self.assertEqual(original["source_metadata_sha256"], "c" * 64)
+        for bad in ({**original, "profile": "unknown"},
+                    {**original, "source_cache_sha256": "bad"},
+                    {**original, "configuration": {}}):
+            with self.subTest(postprocessing=bad):
+                self.change_metadata("yolo", postprocessing=bad)
+                with self.assertRaises(ValueError):
+                    self.prepare()
 
 
 if __name__ == "__main__":

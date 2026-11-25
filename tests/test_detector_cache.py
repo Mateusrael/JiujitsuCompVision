@@ -53,6 +53,22 @@ class DetectorCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Image content changed"):
             self.detect()
 
+    def test_filtered_cache_cannot_be_appended_or_reused_as_raw_detection(self):
+        self.detect()
+        path = self.cache / "yolo.meta.json"
+        metadata = json.loads(path.read_text())
+        metadata["postprocessing"] = {"profile": "cached-pose-quality-v1"}
+        path.write_text(json.dumps(metadata))
+        cache = self.cache / "yolo.jsonl"
+        before = cache.read_bytes()
+        with cache.open("ab") as handle:
+            handle.write(b'{"interrupted":')
+        # Failure happens before load_cache can repair/truncate this read-only cache.
+        with self.assertRaisesRegex(ValueError, "cache-only"):
+            self.detect()
+        self.assertEqual(cache.read_bytes(), before + b'{"interrupted":')
+        self.assertEqual(FakeDetector.calls, 1)
+
     def test_changed_configuration_is_rejected(self):
         self.detect()
         path = self.cache / "yolo.meta.json"

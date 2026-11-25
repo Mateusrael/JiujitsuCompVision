@@ -66,6 +66,36 @@ class PoseComparisonIntegrationTests(unittest.TestCase):
                 for detector_metrics in metrics["detectors"].values():
                     self.assertEqual(detector_metrics, metrics["annotated"])
 
+            def read_cached(name, records, cache_dir):
+                found = detect(name, records, lambda r: images / f"{r['image']}.png", cache_dir, "cpu")
+                for index, row in enumerate(found.values()):
+                    accepted = index != 0
+                    row["quality_filter"] = {"accepted": accepted,
+                                             "reason": "accepted" if accepted else "unreliable_pose"}
+                    if not accepted:
+                        row["poses"] = []
+                return found, {"postprocessing": {"profile": "cached-pose-quality-v1"}}
+
+            with (patch("src.Eval.pose_cache_filter.read_verified_cache_subset", side_effect=read_cached),
+                  patch("src.Eval.pose_detection.detect_records", side_effect=AssertionError("no extraction")),
+                  patch("src.Train.engine.evaluation_types_for_records",
+                        return_value=["held_out_view", "unseen_moment"] * 2)):
+                main(["--checkpoint", str(checkpoint), "--device", "cpu", "--no-progress",
+                      "--limit", "4", "--cache-only", "--output-dir", str(root / "filtered-reports"),
+                      "--cache-dir", str(root / "filtered")])
+            report = json.loads(next((root / "filtered-reports").glob("*.json")).read_text())
+            self.assertTrue(report["comparison"]["cache_only"])
+            for kind, group in report["comparison"]["by_evaluation_type"].items():
+                expected = 1 if kind == "held_out_view" else 2
+                self.assertEqual(group["annotated"]["samples"], 2)
+                for detector in group["accepted_detectors"].values():
+                    self.assertEqual(detector["input_images"], 2)
+                    self.assertEqual(detector["accepted_images"], expected)
+                    self.assertEqual(detector["metrics"]["samples"], expected)
+                    paired = detector["same_reference_frames"]
+                    self.assertEqual(paired["annotated"]["samples"], expected)
+                    self.assertEqual(paired["annotated"], paired["detected"])
+
 
 if __name__ == "__main__":
     unittest.main()

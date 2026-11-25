@@ -331,12 +331,13 @@ def _localization(records, detected_records, reference_kind):
 
 def compare_pose_sources(classifier, records, image_path, *, detector_names, cache_dir,
                          detection_device, batch_size=32, progress=True,
-                         reference_kind="supplied_annotations"):
+                         reference_kind="supplied_annotations", cache_only=False):
     """Compare fixed classifier weights on identical reference and detected-pose frames.
 
     Detectors use every input image, including images without reference poses. The
     reference baseline and matched comparisons require two reference poses. Detector
-    failures stay in all_frames as zero/one-pose inputs.
+    failures stay in all_frames as zero/one-pose inputs. Filtered-cache operating
+    scores use accepted_frames with coverage. cache_only never runs a detector.
     """
     from src.Eval.pose_detection import detect_records, detector_config
 
@@ -359,14 +360,23 @@ def compare_pose_sources(classifier, records, image_path, *, detector_names, cac
                        "excluded_missing_reference_pose": len(records) - len(reference_records)},
         "baseline": _result(reference_records, baseline_predictions, classifier.class_names),
         "detectors": {},
+        "cache_only": cache_only,
         "failure_policy": "all_frames retains zero/one detected poses; missing joints become zero features",
         "classifier_policy": "same checkpoint weights; no retraining or athlete-order alignment before inference",
     }
     common_ids = {r["image"] for r in reference_records}
     predicted_by_name = {}
     for name in detector_names:
-        detections = detect_records(name, records, image_path, cache_dir,
-                                    detection_device, progress=progress)
+        metadata = None
+        if cache_only:
+            from src.Eval.pose_cache_filter import read_verified_cache_subset
+            detections, metadata = read_verified_cache_subset(name, records, cache_dir)
+            for record in records:
+                if detections[record["image"]]["image_sha256"] != sha256_file(image_path(record)):
+                    raise ValueError(f"{name}/{record['image']}: image content differs from cached detection")
+        else:
+            detections = detect_records(name, records, image_path, cache_dir,
+                                        detection_device, progress=progress)
         detected_records, coverage, coverage_ids, two_ids = [], Counter(), {str(i): [] for i in range(3)}, set()
         for row in records:
             found = detections[row["image"]]
@@ -391,7 +401,8 @@ def compare_pose_sources(classifier, records, image_path, *, detector_names, cac
         common_ids &= two_ids
         meta_path = Path(cache_dir) / (name + ".meta.json")
         cache_path = Path(cache_dir) / (name + ".jsonl")
-        metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else None
+        if metadata is None:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else None
         selected_rows = [detections[row["image"]] for row in sorted(records, key=lambda row: row["image"])]
         selected_digest = hashlib.sha256(json.dumps(selected_rows, sort_keys=True, separators=(",", ":"),
                                                      allow_nan=False).encode("utf-8")).hexdigest()
@@ -404,6 +415,7 @@ def compare_pose_sources(classifier, records, image_path, *, detector_names, cac
             "coverage": {str(i): coverage[i] for i in range(3)}, "coverage_image_ids": coverage_ids,
             "detection_seconds": sum(row.get("seconds", 0) for row in selected_rows),
             "all_frames": _result(records, predictions, classifier.class_names),
+            "accepted_frames": _subset(records, predictions, set(coverage_ids["2"]), classifier.class_names),
             "same_reference_frames": _subset(records, predictions, reference_ids, classifier.class_names),
             "same_two_detected": {
                 "image_ids": [r["image"] for r in reference_records if r["image"] in two_ids],
@@ -413,6 +425,22 @@ def compare_pose_sources(classifier, records, image_path, *, detector_names, cac
                                            [r for r in detected_records if r["image"] in reference_ids],
                                            reference_kind),
         }
+        if metadata and "postprocessing" in metadata:
+            audits = [detections[r["image"]]["quality_filter"] for r in records]
+            result["detectors"][name]["quality_filter"] = {
+                "configuration": metadata["postprocessing"],
+                "input_images": len(records), "accepted_images": coverage[2],
+                "rejected_images": len(records) - coverage[2],
+                "rejection_reasons": dict(Counter(a["reason"] for a in audits if not a["accepted"])),
+                "by_class": {label: {
+                    "input": sum(canonical_label(r) == label for r in records),
+                    "accepted": sum(canonical_label(r) == label and a["accepted"]
+                                    for r, a in zip(records, audits))}
+                    for label in classifier.class_names},
+                "per_image": [{"image": r["image"], **a} for r, a in zip(records, audits)],
+                "operating_metrics": "accepted_frames; report acceptance coverage alongside scores",
+                "all_frames_policy": "forced predictions including rejected zero-pose inputs; diagnostic only",
+            }
     result["common_two_detected"] = {
         "image_ids": [r["image"] for r in reference_records if r["image"] in common_ids],
         "annotated": _subset(reference_records, baseline_predictions, common_ids, classifier.class_names),

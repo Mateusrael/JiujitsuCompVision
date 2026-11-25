@@ -33,6 +33,39 @@ Detector metadata records the model name and weights hash; old YOLO11 caches
 are rejected rather than reused as YOLO26 results. Existing reports and caches
 can be kept for comparison.
 
+## Compare existing full-dataset caches without extraction
+
+Filter the saved YOLO26 and ViTPose pairs on CPU as described in
+[detected-pose training](detected_pose_training.md). Then compare an existing
+annotation-trained pose checkpoint against the filtered inputs:
+
+```bash
+.venv/bin/python experiments/compare_pose_detectors.py \
+  --checkpoint trainings/POSE_RUN --split val --per-class 100 \
+  --detector all --cache-only \
+  --cache-dir Data/pose_detections/full_dataset_filtered \
+  --output-dir diagnostics/pose_detectors/filtered_comparison \
+  --device cuda:0
+```
+
+`--cache-only` validates completed cache files and fails on missing frames; it
+never initializes YOLO/ViTPose or extracts poses. Only the classifier runs.
+The original `full_dataset` directory can also be used with this option to
+compare the saved unfiltered inputs. Filtering uses only those cached pairs;
+it cannot recover previously discarded coordinates or introduce new people.
+
+Filtered results include `accepted_frames`, rejection reasons, per-class
+coverage, and supplied/detected metrics on exactly the same accepted reference
+images. Held-out-view and unseen-moment groups also include paired metrics.
+`all_frames` remains a forced-prediction diagnostic that includes zero inputs
+for rejected frames; it is not the filtered pipeline's operating score.
+Report acceptance coverage and visible-joint counts alongside agreement and
+classification scores. Dropping difficult frames alone can raise scores.
+
+This cache-only comparison requires completed full-dataset metadata from the
+extraction queue or offline filter. Filtered caches are read-only and require
+`--cache-only`; detector extraction must continue to use its original cache.
+
 Commands below use existing trusted project checkpoints. Replace `RUN_NAME`
 with a directory under `trainings`; repeat `--checkpoint` to compare more runs.
 Passing a run directory selects `checkpoints/best.pt`; pass `last.pt` explicitly
