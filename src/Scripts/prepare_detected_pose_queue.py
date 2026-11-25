@@ -67,7 +67,7 @@ def verify_cache(directory, name, records, annotation_sha256):
             digest.update(line)
             row = json.loads(line)
             if filter_profile:
-                validate_filtered_row(row, name)
+                validate_filtered_row(row, name, profile=filter_profile)
             else:
                 validate_detection(row)
                 if any(key in row for key in ("quality_filter", "original_poses", "candidates", "selection")):
@@ -204,7 +204,7 @@ def prepare_queue(cache_dir, annotations, split, *, project_root=PROJECT, seeds=
     caches = {name: verify_cache(cache_dir, name, records, annotation_sha) for name in DETECTORS}
     profiles = {cache["quality_filter"]["profile"] for cache in caches.values()}
     if len(profiles) != 1:
-        raise ValueError("Detector filtering profiles differ; use both raw caches or both filtered caches")
+        raise ValueError("Detector filtering profiles differ; use both raw caches or the same filtered profile")
     selected_ids = {}
     for name, cache in caches.items():
         config = {"model": "pose", "pose_detections": cache["path"],
@@ -321,7 +321,7 @@ def print_report(report):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", type=Path,
-                        default=PROJECT / "Data/pose_detections/full_dataset_filtered")
+                        default=PROJECT / "Data/pose_detections/full_dataset_filtered_v2")
     parser.add_argument("--annotations", type=Path, default=PROJECT / "Data/annotations.json")
     parser.add_argument("--split", type=Path, default=PROJECT / "Data/splits/multiview_sections_shifted.json")
     parser.add_argument("--output", type=Path, default=PROJECT / "launchers/detected-poses.local.json")

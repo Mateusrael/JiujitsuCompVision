@@ -43,8 +43,8 @@ annotation-trained pose checkpoint against the filtered inputs:
 .venv/bin/python experiments/compare_pose_detectors.py \
   --checkpoint trainings/POSE_RUN --split val --per-class 100 \
   --detector all --cache-only \
-  --cache-dir Data/pose_detections/full_dataset_filtered \
-  --output-dir diagnostics/pose_detectors/filtered_comparison \
+  --cache-dir Data/pose_detections/full_dataset_filtered_v2 \
+  --output-dir diagnostics/pose_detectors/filtered_v2_comparison \
   --device cuda:0
 ```
 
@@ -53,6 +53,14 @@ never initializes YOLO/ViTPose or extracts poses. Only the classifier runs.
 The original `full_dataset` directory can also be used with this option to
 compare the saved unfiltered inputs. Filtering uses only those cached pairs;
 it cannot recover previously discarded coordinates or introduce new people.
+
+The default v2 filter keeps duplicate-skeleton rejection and requires each
+athlete to have 8 reliable body joints, including 2 shoulder/hip joints, with no
+separate minimum for knees or ankles. Its relaxed torso and lower-limb rules
+allow partial occlusion. The older v1 caches in `full_dataset_filtered` remain
+readable with their original thresholds; pass that directory explicitly to
+compare them. V2 writes a separate directory and does not modify either the
+original detector caches or the v1 caches.
 
 Filtered results include `accepted_frames`, rejection reasons, per-class
 coverage, and supplied/detected metrics on exactly the same accepted reference

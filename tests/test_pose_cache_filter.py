@@ -186,6 +186,55 @@ class CacheFilterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "configuration"):
             filtering.validate_postprocessing("yolo", altered_metadata)
 
+    def test_v1_archives_remain_readable_while_v2_recovers_partial_pairs(self):
+        partial_torso, partial_legs = pose(), pose()
+        for index in (5, 6):
+            partial_torso[index] = [0., 0., 0.]
+        for index in (13, 14, 15, 16):
+            partial_legs[index] = [0., 0., 0.]
+        rows = deepcopy(self.rows)
+        rows[1]["poses"] = [partial_torso, pose(100)]
+        rows[2]["poses"] = [partial_legs, pose(100)]
+        for name in filtering.DETECTORS:
+            self.save_source(name, rows)
+        original_bytes = self.snapshot()
+        v1_output = self.root / "archive_v1"
+        filtering.filter_caches(self.source, v1_output, self.annotations, profile="cached-pose-quality-v1")
+        self.run_filter()
+        self.assertEqual(self.snapshot(), original_bytes)
+        for name in filtering.DETECTORS:
+            v1_rows, v1_meta = filtering.read_verified_cache_subset(name, self.records, v1_output)
+            v2_rows, v2_meta = filtering.read_verified_cache_subset(name, self.records, self.output)
+            self.assertEqual(filtering.validate_postprocessing(name, v1_meta), "cached-pose-quality-v1")
+            self.assertEqual(filtering.validate_postprocessing(name, v2_meta), "cached-pose-quality-v2")
+            self.assertEqual(v1_meta["coverage"], {"0":3, "1":0, "2":1})
+            self.assertEqual(v2_meta["coverage"], {"0":1, "1":0, "2":3})
+            for image in ("0000001", "0000002"):
+                self.assertEqual(v1_rows[image]["poses"], [])
+                self.assertEqual(v2_rows[image]["poses"], v2_rows[image]["original_poses"])
+            for detected in (v1_rows, v2_rows):
+                duplicate = detected["0000003"]
+                self.assertEqual(duplicate["poses"], [])
+                self.assertEqual(duplicate["quality_filter"]["reason"], "duplicate_skeletons")
+
+    def test_rows_must_match_the_cache_profile_even_with_a_valid_checksum(self):
+        filtering.filter_caches(self.source, self.output, self.annotations, profile="cached-pose-quality-v1")
+        path = self.output / "yolo.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[0]["quality_filter"]["profile"] = "cached-pose-quality-v2"
+        # This fully observed pair passes either policy; its row is valid v2,
+        # but the containing cache declares the immutable v1 policy.
+        filtering.validate_filtered_row(rows[0], "yolo")
+        with self.assertRaisesRegex(ValueError, "profile differs"):
+            filtering.validate_filtered_row(rows[0], "yolo", profile="cached-pose-quality-v1")
+        path.write_text("".join(json.dumps(row)+"\n" for row in rows), encoding="utf-8", newline="\n")
+        metadata_path = path.with_suffix(".meta.json")
+        metadata = json.loads(metadata_path.read_text())
+        metadata["cache_sha256"] = sha256_file(path)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "profile differs"):
+            filtering.read_verified_cache_subset("yolo", self.records, self.output)
+
     def test_filtering_imports_no_gpu_image_or_detector_libraries(self):
         script = """
 import builtins, sys
@@ -211,10 +260,22 @@ read_verified_cache_subset('yolo', [{'image':'0000000'}], sys.argv[1])
             self.run_filter()
 
     def test_cli_defaults_are_cached_input_and_new_filtered_output(self):
-        from src.Scripts.filter_pose_cache import build_parser
+        from src.Scripts.filter_pose_cache import build_parser, output_directory
         args = build_parser().parse_args([])
         self.assertEqual(args.input_dir.name, "full_dataset")
-        self.assertEqual(args.output_dir.name, "full_dataset_filtered")
+        self.assertEqual(args.profile, "cached-pose-quality-v2")
+        self.assertEqual(output_directory(args).name, "full_dataset_filtered_v2")
+        old = build_parser().parse_args(["--profile", "cached-pose-quality-v1"])
+        self.assertEqual(output_directory(old).name, "full_dataset_filtered")
+        custom = build_parser().parse_args(["--output-dir", str(self.output)])
+        self.assertEqual(output_directory(custom), self.output)
+
+    def test_cli_passes_selected_profile_and_dynamic_output_to_filter(self):
+        from src.Scripts import filter_pose_cache as cli
+        with patch.object(cli, "filter_caches", return_value={}) as run:
+            cli.main(["--profile", "cached-pose-quality-v1"])
+            self.assertEqual(run.call_args.kwargs["profile"], "cached-pose-quality-v1")
+            self.assertEqual(run.call_args.args[1].name, "full_dataset_filtered")
 
 
 if __name__ == "__main__":

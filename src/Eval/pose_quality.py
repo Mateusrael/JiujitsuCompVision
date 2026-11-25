@@ -19,6 +19,11 @@ BODY_EDGES = ((5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
               (5, 11), (6, 12), (11, 12), (11, 13), (13, 15),
               (12, 14), (14, 16))
 
+QUALITY_PROFILES = ("cached-pose-quality-v1", "cached-pose-quality-v2")
+DEFAULT_PROFILE = QUALITY_PROFILES[-1]
+
+# Keep the original settings immutable so previously filtered caches can be
+# validated against the policy that produced them.
 _SETTINGS = {
     "profile": "cached-pose-quality-v1",
     "min_body_joints": 8,
@@ -36,12 +41,19 @@ _SETTINGS = {
 }
 
 
-def quality_config(detector):
+def quality_config(detector, profile=DEFAULT_PROFILE):
     """Return a fresh JSON-serializable copy of the immutable named policy."""
     if detector not in ("yolo", "vitpose"):
         raise ValueError(f"Unknown pose detector: {detector!r}")
-    return {**deepcopy(_SETTINGS), "detector": detector,
-            "joint_confidence": 0.5 if detector == "yolo" else 0.3}
+    if profile not in QUALITY_PROFILES:
+        raise ValueError(f"Unknown cached-pose quality profile: {profile!r}")
+    config = {**deepcopy(_SETTINGS), "detector": detector,
+              "joint_confidence": 0.5 if detector == "yolo" else 0.3}
+    if profile == "cached-pose-quality-v2":
+        # Hidden knees/ankles need not invalidate a reliable upper-body estimate.
+        # The eight-body-joint floor still prevents very sparse poses passing.
+        config.update(profile=profile, min_torso_joints=2, min_lower_limb_joints=0)
+    return config
 
 
 def _numeric(value):
@@ -139,7 +151,7 @@ def _duplicates(first, second, config):
             and close >= config["duplicate_min_close_fraction"])
 
 
-def filter_pose_pair(poses, *, detector):
+def filter_pose_pair(poses, *, detector, profile=DEFAULT_PROFILE):
     """Filter a cached pair without reordering or introducing any new poses.
 
     Returns zero or two sanitized poses and a detailed ``quality_filter`` audit.
@@ -147,8 +159,10 @@ def filter_pose_pair(poses, *, detector):
     three zeros; confidence is clamped to [0,1]. The original image dimensions
     are unavailable, so there is deliberately no invented upper coordinate bound.
     A weak/missing/duplicate pair is entirely excluded. Input is not modified.
+    v2 allows two reliable torso joints and imposes no separate lower-limb
+    minimum. v1 retains the original three-torso/two-lower-limb requirements.
     """
-    config = quality_config(detector)
+    config = quality_config(detector, profile)
     if not isinstance(poses, (list, tuple)) or len(poses) > 2:
         raise ValueError("Cached input must contain zero, one or two poses")
     assessed = [_assess_pose(pose, i, config) for i, pose in enumerate(poses)]

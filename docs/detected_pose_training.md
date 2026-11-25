@@ -18,11 +18,13 @@ Run from the project root in the server environment:
 ```
 
 The filter reads `Data/pose_detections/full_dataset` and writes separate caches
-under `Data/pose_detections/full_dataset_filtered`. Keep the original caches
-unchanged: existing runs and checkpoints record their checksums. Filtering does
+under `Data/pose_detections/full_dataset_filtered_v2`. The default profile is
+`cached-pose-quality-v2`. Keep the original caches and any earlier
+`full_dataset_filtered` v1 caches unchanged: existing runs and checkpoints record
+their checksums. Filtering does
 not modify running trainings or replace their input files.
 
-Queue defaults are `Data/pose_detections/full_dataset_filtered`, `Data/annotations.json`,
+Queue defaults are `Data/pose_detections/full_dataset_filtered_v2`, `Data/annotations.json`,
 `Data/splits/multiview_sections_shifted.json`, and
 `launchers/detected-poses.local.json`. Override them with `--cache-dir`,
 `--annotations`, `--split`, or `--output`. Add `--dry-run` to perform the same
@@ -37,8 +39,19 @@ configurations for each detector. Repeated seeds are explicit:
 
 That command prepares 24 jobs. To inspect or train from the unfiltered extraction,
 pass `--cache-dir Data/pose_detections/full_dataset`. The preflight accepts the
-original detector configuration and explicitly identifies raw versus filtered
-caches. It rejects a directory that mixes the two.
+original detector configuration and explicitly identifies raw, v1, and v2
+caches. It rejects a directory that mixes profiles, or rows whose filtering
+version differs from the cache metadata. Existing v1 caches remain readable:
+
+```bash
+.venv/bin/python -m src.Scripts.prepare_detected_pose_queue \
+  --cache-dir Data/pose_detections/full_dataset_filtered
+```
+
+To reproduce v1 from the original caches, use
+`.venv/bin/python -m src.Scripts.filter_pose_cache --profile cached-pose-quality-v1`.
+Its default output is `full_dataset_filtered`;
+the filter will not overwrite an existing destination.
 
 Preparation refuses absent or unfinished final caches, changed SHA-256 identities,
 different detector configurations, missing/duplicate cache images, and invalid
@@ -113,7 +126,7 @@ are replaced and validation/test use supplied poses.
 
 ## Interpret the detector comparison
 
-The `cached-pose-quality-v1` filter uses only the zero, one, or two skeletons
+The `cached-pose-quality-v2` filter uses only the zero, one, or two skeletons
 already stored for an image. It masks unreliable joints and accepts a frame only
 when both cached skeletons pass its confidence and geometry checks. It does not
 consult supplied poses or position labels, search for another person, infer new
@@ -121,6 +134,14 @@ coordinates, or recover people discarded during the original extraction.
 Rejected frames remain in the filtered cache with an empty pose list and an
 audit reason; the normal two-pose training filter excludes them from every
 partition. Each filtered row preserves its original cached poses for diagnosis.
+
+For each athlete, v2 requires at least **8 reliable body joints** among the
+shoulders through ankles, including **2 torso joints** among shoulders and hips.
+There is **no separate minimum for knees and ankles**. This allows more partial
+occlusion than v1, which required 3 torso joints and 2 knee/ankle joints. The
+eight-body-joint requirement, confidence thresholds, geometry checks, and
+duplicate-skeleton rejection are unchanged. V1 retains its original behavior;
+it is not reinterpreted using the v2 thresholds.
 
 These checks are heuristics, not a guarantee of annotation-level pose quality.
 Before a large training batch, inspect the filtering report, preflight coverage,

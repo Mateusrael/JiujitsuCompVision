@@ -10,7 +10,7 @@ from unittest.mock import patch
 from src.Dataset.annotations import CLASS_NAMES_10, sha256_file
 from src.Dataset.splits import build_manifest
 from src.Eval.pose_detection import detector_config
-from src.Eval.pose_quality import filter_pose_pair, quality_config
+from src.Eval.pose_quality import DEFAULT_PROFILE, filter_pose_pair, quality_config
 from src.Scripts.prepare_detected_pose_queue import (
     _partition_counts, _split_balance, build_parser, main, prepare_queue, verify_cache)
 from src.Train.queue_plan import prepare_plan
@@ -46,7 +46,7 @@ class DetectedPoseQueueTests(unittest.TestCase):
         for name in ("yolo", "vitpose"):
             self.write_cache(name)
 
-    def write_cache(self, name, *, missing=(), single=(), filtered=False):
+    def write_cache(self, name, *, missing=(), single=(), filtered=False, profile=DEFAULT_PROFILE):
         path = self.cache_dir / f"{name}.jsonl"
         rows = [{"image": row["image"],
                  "poses": [] if row["image"] in missing else
@@ -60,7 +60,8 @@ class DetectedPoseQueueTests(unittest.TestCase):
             poses = [[[x + shift, y, .9] for x, y in xy] for shift in (0, 120)]
             for row in rows:
                 original = poses[:len(row["poses"])]
-                row.update(original_poses=original, **filter_pose_pair(original, detector=name))
+                row.update(original_poses=original,
+                           **filter_pose_pair(original, detector=name, profile=profile))
         with path.open("w", encoding="utf-8", newline="\n") as handle:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
@@ -72,7 +73,7 @@ class DetectedPoseQueueTests(unittest.TestCase):
             metadata.update(filtering_wall_seconds=.01,
                             row_seconds_meaning="original_detector_inference")
             metadata["postprocessing"] = {
-                "profile": "cached-pose-quality-v1", "configuration": quality_config(name),
+                "profile": profile, "configuration": quality_config(name, profile=profile),
                 "source_cache": str(self.root / "original" / f"{name}.jsonl"),
                 "source_cache_sha256": "b" * 64, "source_metadata_sha256": "c" * 64}
         path.with_suffix(".meta.json").write_text(json.dumps(metadata), encoding="utf-8")
@@ -276,7 +277,7 @@ class DetectedPoseQueueTests(unittest.TestCase):
                 self.prepare(seeds=invalid)
         args = build_parser().parse_args([])
         self.assertEqual(args.seeds, [46])
-        self.assertEqual(args.cache_dir.name, "full_dataset_filtered")
+        self.assertEqual(args.cache_dir.name, "full_dataset_filtered_v2")
         self.assertEqual(build_parser().parse_args(["--seeds", "46", "47", "48"]).seeds,
                          [46, 47, 48])
 
@@ -288,7 +289,7 @@ class DetectedPoseQueueTests(unittest.TestCase):
         self.assertEqual(len(queue["jobs"]), 8)
         for name in ("yolo", "vitpose"):
             audit = report["detectors"][name]["quality_filter"]
-            self.assertEqual(audit["profile"], "cached-pose-quality-v1")
+            self.assertEqual(audit["profile"], DEFAULT_PROFILE)
             self.assertEqual(audit["accepted_pairs"], 58)
             self.assertEqual(audit["rejected_frames"], 2)
             self.assertEqual(audit["input_poses"], 117)
@@ -296,6 +297,35 @@ class DetectedPoseQueueTests(unittest.TestCase):
             self.assertEqual(sum(audit["frame_rejection_reasons"].values()), 2)
             self.assertEqual(report["detectors"][name]["partitions"]["val"]["eligible"]["samples"], 18)
         self.assertEqual(json.loads(self.split.read_text()), self.manifest)
+
+    def test_both_filter_versions_are_supported_without_changing_the_queue(self):
+        queues = []
+        for profile in ("cached-pose-quality-v1", "cached-pose-quality-v2"):
+            for name in ("yolo", "vitpose"):
+                self.write_cache(name, filtered=True, profile=profile)
+            queue, report = self.prepare()
+            queues.append(queue)
+            self.assertEqual(len(queue["jobs"]), 8)
+            self.assertEqual(report["seeds"], [46])
+            for name in ("yolo", "vitpose"):
+                self.assertEqual(report["detectors"][name]["quality_filter"]["profile"], profile)
+        self.assertEqual(queues[0], queues[1])
+        self.assertEqual(json.loads(self.split.read_text()), self.manifest)
+
+    def test_rejects_mixed_filter_versions_between_detectors_or_inside_cache(self):
+        self.write_cache("yolo", filtered=True, profile="cached-pose-quality-v1")
+        self.write_cache("vitpose", filtered=True, profile="cached-pose-quality-v2")
+        with self.assertRaisesRegex(ValueError, "profiles differ"):
+            self.prepare()
+        path = self.write_cache("yolo", filtered=True, profile="cached-pose-quality-v2")
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        # This pair passes both profiles; only its audit version is changed.
+        rows[0].update(filter_pose_pair(rows[0]["original_poses"], detector="yolo",
+                                      profile="cached-pose-quality-v1"))
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        self.change_metadata("yolo", cache_sha256=sha256_file(path))
+        with self.assertRaisesRegex(ValueError, "filter|profile"):
+            self.prepare()
 
     def test_filtered_profile_cannot_relabel_raw_cache_or_mix_profiles(self):
         self.write_cache("yolo", filtered=True)

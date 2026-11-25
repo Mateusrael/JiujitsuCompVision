@@ -18,11 +18,10 @@ import time
 
 from src.Dataset.annotations import load_annotations, sha256_file
 from src.Eval.pose_detection import detector_config, validate_detection
-from src.Eval.pose_quality import filter_pose_pair, quality_config
+from src.Eval.pose_quality import DEFAULT_PROFILE, QUALITY_PROFILES, filter_pose_pair, quality_config
 
 
 DETECTORS = ("yolo", "vitpose")
-PROFILE = "cached-pose-quality-v1"
 
 
 def _digest(value):
@@ -40,8 +39,8 @@ def validate_postprocessing(name, metadata):
     if (not isinstance(details, dict)
             or set(details) != {"profile", "configuration", "source_cache",
                                 "source_cache_sha256", "source_metadata_sha256"}
-            or details.get("profile") != PROFILE
-            or details.get("configuration") != quality_config(name)):
+            or details.get("profile") not in QUALITY_PROFILES
+            or details.get("configuration") != quality_config(name, profile=details["profile"])):
         raise ValueError(f"{name}: unsupported postprocessing configuration")
     path = details["source_cache"]
     if (not isinstance(path, str) or not path
@@ -54,15 +53,20 @@ def validate_postprocessing(name, metadata):
             or not math.isfinite(seconds) or seconds < 0
             or metadata.get("row_seconds_meaning") != "original_detector_inference"):
         raise ValueError(f"{name}: invalid postprocessing timing metadata")
-    return PROFILE
+    return details["profile"]
 
 
-def validate_filtered_row(row, name):
+def validate_filtered_row(row, name, profile=None):
     """Validate an output and replay filtering of its originally selected poses."""
     validate_detection(row)
     original = row.get("original_poses")
     validate_detection({**row, "poses": original})
-    expected = filter_pose_pair(original, detector=name)
+    audit = row.get("quality_filter")
+    if not isinstance(audit, dict) or audit.get("profile") not in QUALITY_PROFILES:
+        raise ValueError(f"{name}: {row['image']} has an unsupported quality filter profile")
+    if profile is not None and audit["profile"] != profile:
+        raise ValueError(f"{name}: {row['image']} quality filter profile differs from cache metadata")
+    expected = filter_pose_pair(original, detector=name, profile=audit["profile"])
     if (len(row["poses"]) not in (0, 2) or row["poses"] != expected["poses"]
             or row.get("quality_filter") != expected["quality_filter"]):
         raise ValueError(f"{name}: {row['image']} has inconsistent filtered poses or audit")
@@ -94,7 +98,7 @@ def _verified_rows(name, path, metadata, metadata_sha256, *, expected_ids=None):
     """Yield rows, then verify completeness; callers must exhaust the iterator."""
     digest, seen = hashlib.sha256(), set()
     coverage = {"0": 0, "1": 0, "2": 0}
-    filtered = validate_postprocessing(name, metadata) is not None
+    profile = validate_postprocessing(name, metadata)
     with path.open("rb") as handle:
         for line in handle:
             if not line.endswith(b"\n"):
@@ -102,8 +106,8 @@ def _verified_rows(name, path, metadata, metadata_sha256, *, expected_ids=None):
             digest.update(line)
             row = json.loads(line)
             validate_detection(row)
-            if filtered:
-                validate_filtered_row(row, name)
+            if profile is not None:
+                validate_filtered_row(row, name, profile=profile)
             elif any(key in row for key in ("quality_filter", "original_poses", "candidates", "selection")):
                 raise ValueError(f"{name}: raw cache contains unexpected selection/filter metadata")
             image = row["image"]
@@ -146,8 +150,10 @@ def read_verified_cache_subset(name, records, cache_dir):
     return selected, metadata
 
 
-def filter_caches(input_dir, output_dir, annotations):
+def filter_caches(input_dir, output_dir, annotations, *, profile=DEFAULT_PROFILE):
     """Stream both original detector caches into a new, atomically published directory."""
+    if profile not in QUALITY_PROFILES:
+        raise ValueError(f"Unsupported quality filter profile: {profile}")
     input_dir, output_dir = Path(input_dir).resolve(), Path(output_dir).resolve()
     annotations = Path(annotations).resolve()
     if output_dir.exists():
@@ -179,7 +185,7 @@ def filter_caches(input_dir, output_dir, annotations):
             target = staging / f"{name}.jsonl"
             with target.open("xb") as output:
                 for row in _verified_rows(name, source, metadata, metadata_sha256, expected_ids=expected_ids):
-                    result = filter_pose_pair(row["poses"], detector=name)
+                    result = filter_pose_pair(row["poses"], detector=name, profile=profile)
                     filtered = {**row, "original_poses": row["poses"], **result}
                     validate_detection(filtered)
                     audit = result["quality_filter"]
@@ -200,7 +206,7 @@ def filter_caches(input_dir, output_dir, annotations):
             finished_metadata = {
                 **metadata, "cache_path": str(output_dir / target.name),
                 "cache_sha256": digest.hexdigest(), "coverage": coverage,
-                "postprocessing": {"profile": PROFILE, "configuration": quality_config(name),
+                "postprocessing": {"profile": profile, "configuration": quality_config(name, profile=profile),
                     "source_cache": str(source), "source_cache_sha256": metadata["cache_sha256"],
                     "source_metadata_sha256": metadata_sha256},
                 "filtering_wall_seconds": time.perf_counter()-started,

@@ -5,7 +5,7 @@ import json
 import math
 import unittest
 
-from src.Eval.pose_quality import filter_pose_pair, quality_config
+from src.Eval.pose_quality import DEFAULT_PROFILE, QUALITY_PROFILES, filter_pose_pair, quality_config
 
 
 def pose(dx=0, dy=0, confidence=.9, angle=0, scale=1):
@@ -21,12 +21,12 @@ def pose(dx=0, dy=0, confidence=.9, angle=0, scale=1):
 
 
 class PoseQualityTests(unittest.TestCase):
-    def filter(self, poses, detector="yolo"):
-        result=filter_pose_pair(poses,detector=detector)
+    def filter(self, poses, detector="yolo", profile=DEFAULT_PROFILE):
+        result=filter_pose_pair(poses,detector=detector,profile=profile)
         json.dumps(result,allow_nan=False)
         self.assertIn(len(result["poses"]),(0,2))
         audit=result["quality_filter"]
-        self.assertEqual(audit["profile"],"cached-pose-quality-v1")
+        self.assertEqual(audit["profile"],profile)
         self.assertEqual(audit["detector"],detector)
         self.assertEqual(audit["input_pose_count"],len(poses))
         self.assertEqual(len(audit["pose_quality"]),len(poses))
@@ -55,14 +55,44 @@ class PoseQualityTests(unittest.TestCase):
             self.assertEqual(result["quality_filter"]["reason"],"unreliable_pose")
             self.assertIn("insufficient_body_joints",result["quality_filter"]["pose_quality"][0]["reasons"])
 
-    def test_torso_and_lower_limb_coverage_are_required_independently(self):
+    def test_v1_preserves_original_torso_and_lower_limb_requirements(self):
         for removed,reason in [([5,6],"insufficient_torso_joints"),
                                ([13,14,15],"insufficient_lower_limb_joints")]:
             first=pose()
             for i in removed:first[i]=[0,0,0]
+            result=self.filter([first,pose(100)], profile="cached-pose-quality-v1")
+            self.assertFalse(result["quality_filter"]["accepted"])
+            self.assertIn(reason,result["quality_filter"]["pose_quality"][0]["reasons"])
+
+    def test_v2_keeps_partial_poses_with_two_torso_joints_or_hidden_lower_limbs(self):
+        for removed in ((5,6), (11,12), (13,14,15), (13,14,15,16)):
+            first=pose()
+            for index in removed:first[index]=[0,0,0]
+            original=deepcopy(first)
+            for detector in ("yolo", "vitpose"):
+                with self.subTest(removed=removed, detector=detector):
+                    old=self.filter([first,pose(100)], detector, "cached-pose-quality-v1")
+                    new=self.filter([first,pose(100)], detector)
+                    self.assertFalse(old["quality_filter"]["accepted"])
+                    self.assertTrue(new["quality_filter"]["accepted"])
+                    self.assertEqual(new["poses"][0], original)
+            self.assertEqual(first,original)
+
+    def test_v2_still_requires_two_torso_joints_and_eight_body_joints(self):
+        for removed,reason in (((5,6,11),"insufficient_torso_joints"),
+                               ((9,13,14,15,16),"insufficient_body_joints")):
+            first=pose()
+            for index in removed:first[index]=[0,0,0]
             result=self.filter([first,pose(100)])
             self.assertFalse(result["quality_filter"]["accepted"])
             self.assertIn(reason,result["quality_filter"]["pose_quality"][0]["reasons"])
+
+    def test_relaxation_does_not_admit_duplicate_partial_skeletons(self):
+        first,second=pose(),pose(1)
+        for index in (13,14,15,16):
+            first[index]=second[index]=[0,0,0]
+        result=self.filter([first,second])
+        self.assertEqual(result["quality_filter"]["reason"],"duplicate_skeletons")
 
     def test_missing_face_is_allowed_when_body_is_reliable(self):
         first=pose()
@@ -96,11 +126,12 @@ class PoseQualityTests(unittest.TestCase):
             self.assertIn("head_joint_outlier",result["quality_filter"]["pose_quality"][0]["reasons"])
 
     def test_duplicate_skeletons_are_not_two_people(self):
-        result=self.filter([pose(),pose(1)])
-        self.assertEqual(result["poses"],[])
-        self.assertEqual(result["quality_filter"]["reason"],"duplicate_skeletons")
-        self.assertTrue(all("duplicate_skeleton" in item["reasons"]
-                            for item in result["quality_filter"]["pose_quality"]))
+        for profile in QUALITY_PROFILES:
+            result=self.filter([pose(),pose(1)],profile=profile)
+            self.assertEqual(result["poses"],[])
+            self.assertEqual(result["quality_filter"]["reason"],"duplicate_skeletons")
+            self.assertTrue(all("duplicate_skeleton" in item["reasons"]
+                                for item in result["quality_filter"]["pose_quality"]))
 
     def test_overlapping_distinct_skeletons_are_kept(self):
         result=self.filter([pose(),pose(angle=math.pi/2)])
@@ -141,6 +172,11 @@ class PoseQualityTests(unittest.TestCase):
         config=quality_config("yolo");config["min_body_joints"]=0
         self.assertEqual(quality_config("yolo")["min_body_joints"],8)
         with self.assertRaises(ValueError):quality_config("unknown")
+        with self.assertRaises(ValueError):quality_config("yolo", "unknown-profile")
+        old=quality_config("vitpose", "cached-pose-quality-v1")
+        new=quality_config("vitpose")
+        changed={key for key in old if old[key] != new[key]}
+        self.assertEqual(changed,{"profile","min_torso_joints","min_lower_limb_joints"})
         for invalid in [None,{},[pose()]*3,[None],[[[0,0,.9]]],
                         [[[True,0,.9]]*17]]:
             with self.assertRaises(ValueError):filter_pose_pair(invalid,detector="yolo")
