@@ -1,8 +1,10 @@
 # Concurrent training queue
 
-The Linux queue starts from one terminal and runs up to **six trainings at once**.
-Each training gets one GPU, selected when it starts. One queue-managed training
-can occupy each GPU. Completed slots are filled from the same job list, so a slow
+The Linux queue starts from one terminal and runs up to **six trainings at once
+per queue** by default. Multiple queues can run concurrently in the same project.
+Each queue uses at most one of its own active trainings per GPU, but different
+queues can share a GPU when its current free memory and utilization meet their
+launch criteria. Completed slots are filled from each queue's job list, so a slow
 image run does not hold up unrelated pose experiments.
 
 The manager runs in the background without `nohup` or `tmux`. Closing a log
@@ -46,8 +48,10 @@ The captured terminal uses 120 columns; use a terminal at least that wide for
 the cleanest display. Raw ANSI and carriage-return bytes preserve tqdm updates;
 these files are terminal recordings, not line-oriented text logs.
 
-Commands default to the latest queue. Choose an older queue explicitly with
-`status QUEUE_NAME`, or `logs JOB_ID --name QUEUE_NAME`.
+Commands default to the latest successfully started queue. When several queues
+are active, select the intended queue explicitly with `status QUEUE_NAME`,
+`logs JOB_ID --name QUEUE_NAME`, or `pause`, `resume`, and `stop` followed by
+`QUEUE_NAME`.
 The queue name is printed at start; `start --name NAME` supplies a unique name.
 
 ## Plan format
@@ -96,12 +100,14 @@ mixing models. For a new training stage, use `init_from` instead of `resume` and
 supply the desired training options. Checkpoint paths must already exist when
 the plan is submitted. Do not queue a checkpoint that another process is still
 resuming/writing. Duplicate output directories within one plan are rejected.
+Managers also lock their training output directories, so two queues cannot write
+the same run or resume the same checkpoint concurrently.
 
 ## GPU selection
 
 The manager discovers the GPUs actually visible to PyTorch, respecting inherited
 CUDA masks. Before each launch it reads current free memory and utilization from
-`nvidia-smi`, excludes GPUs already used by its active jobs, and requires the
+`nvidia-smi`, excludes GPUs already used by its own active jobs, and requires the
 job's memory threshold. Among eligible GPUs it prefers the lowest utilization,
 then the most free memory. The child receives the selected GPU's UUID through
 `CUDA_VISIBLE_DEVICES`; inside that training it appears as `cuda:0`.
@@ -118,9 +124,10 @@ remain on their assigned GPU; no live migration occurs. A failed run, including
 an out-of-memory error, is recorded and the queue continues with other jobs.
 There are no automatic retries or silent checkpoint restarts.
 
-Full GPUs are supported; MIG instances are currently rejected. An existing
-training started outside this manager is reflected in GPU telemetry but does
-not count toward the queue's six-process limit.
+Full GPUs are supported; MIG instances are currently rejected. Trainings from
+other queues or processes are reflected in GPU telemetry but do not count toward
+this queue's `max_parallel` limit. There is no project-wide limit of six trainings
+and no exclusive GPU reservation across queues.
 
 ## Pause and stop
 
@@ -142,14 +149,16 @@ started by this manager are signalled. Normal training checkpoints remain where
 the trainer saved them; termination does not promise a checkpoint for the
 partially completed epoch.
 
-Only one manager may be active per project checkout. Plans are frozen at start;
-editing the source JSON does not change an existing queue. Finished/stopped
-queues cannot be restarted. Create a new plan with fresh runs or explicit
-checkpoint resumes. After an unexpected manager/container failure, inspect
-remaining processes before starting another queue; offline manager states are
-marked potentially stale rather than treated as proof that training stopped.
-Startup refuses to overlap a previous queue's recorded, still-live training
-processes, verifying both process ID and Linux boot/start identity.
+Each queue has its own manager lock; starting another manager for that same queue
+is rejected. Separate queues can run together when their output directories do
+not conflict. Plans are frozen at start; editing the source JSON does not change
+an existing queue. Finished/stopped queues cannot be restarted. Create a new
+plan with fresh runs or explicit checkpoint resumes. After an unexpected
+manager/container failure, inspect remaining processes before resuming the same
+runs; offline manager states are marked potentially stale rather than treated
+as proof that training stopped. Startup checks recorded live training processes
+before reusing their output directories, verifying both process ID and Linux
+boot/start identity.
 
 Queue plans, state, manager messages and per-job terminal recordings are saved
 under `diagnostics/queues/QUEUE_NAME`. Normal training metrics and checkpoints

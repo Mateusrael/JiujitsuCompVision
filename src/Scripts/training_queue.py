@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -69,6 +70,16 @@ def read_state(directory):
     return state
 
 
+def select_latest(root, name):
+    """Publish a completed start without sharing a temp file with other starters."""
+    temporary = Path(root) / f"latest-{uuid4().hex}.json"
+    try:
+        write_json(temporary, {"name": name})
+        temporary.replace(Path(root) / "latest.json")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def start_queue(args):
     from src.Train.queue_gpu import discover_allowed_gpus, query_gpus
     name = identifier(args.name or datetime.now(timezone.utc).strftime("queue-%Y%m%dT%H%M%SZ-") + str(os.getpid()))
@@ -118,8 +129,9 @@ def start_queue(args):
         if state["status"] == "starting":
             state.update(status="failed", error="Manager exited before initialization")
             write_json(directory / "state.json", state)
-        raise RuntimeError(f"Queue could not start. See {directory / 'manager.log'}")
-    write_json(root / "latest.json", {"name": name})
+        detail = state.get("error", "Manager exited before initialization")
+        raise RuntimeError(f"Queue could not start: {detail}. See {directory / 'manager.log'}")
+    select_latest(root, name)
     if state["status"] == "starting":
         print(f"Queue {name}: manager still starting; readiness is not yet confirmed. Check status or manager.log.")
     else:
@@ -148,9 +160,14 @@ def print_status(state):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.action == "_manager":
+        from src.Train.queue_locks import QueueAlreadyRunning
+
         try:
             from src.Train.queue_manager import run_manager
             return run_manager(args.directory)
+        except QueueAlreadyRunning:
+            # A duplicate invocation must not mark the actual owner's state failed.
+            raise
         except Exception as error:
             state = read_state(args.directory)
             state.update(status="failed", error=str(error))

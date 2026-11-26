@@ -1,4 +1,4 @@
-"""Concurrent single-host queue: one owned training per selected GPU."""
+"""Concurrent single-host queues: one owned training per GPU within each queue."""
 
 import json
 import os
@@ -173,41 +173,13 @@ class QueueManager:
                 self.save()
 
 
-def check_previous_manager(lock):
-    """Refuse to overlap children surviving a previous supervisor crash."""
-    lock.seek(0)
-    raw = lock.read().strip()
-    if not raw:
-        return
-    previous = Path(json.loads(raw)["directory"])
-    state_path = previous / "state.json"
-    if not state_path.exists():
-        raise RuntimeError(f"Previous queue state is missing: {previous}; inspect it before clearing the queue lock record")
-    state = json.loads(state_path.read_text())
-    for job in state.get("jobs", []):
-        pid, token = job.get("pid"), job.get("process_token")
-        if pid and token and process_token(pid) == token:
-            raise RuntimeError(f"Previous queue still owns live job {job['id']} (PID {pid}). "
-                               f"Inspect {previous}; wait for or stop that training before starting another queue")
-
-
 def run_manager(directory):
-    import fcntl
+    from src.Train.queue_locks import queue_claims
+
     directory = Path(directory).resolve()
     plan = json.loads((directory / "plan.json").read_text())
-    # All queues in this checkout share one supervisor, even with a custom output root.
-    lock_path = Path(plan["project_root"]) / "diagnostics" / ".training-queue.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeError("Another queue is already active in this project") from error
-        check_previous_manager(lock)
-        lock.seek(0)
-        lock.truncate()
-        lock.write(json.dumps({"directory": str(directory)}))
-        lock.flush()
+    # Other queues may share GPUs; only this manager and its outputs are exclusive.
+    with queue_claims(directory, plan):
         manager = QueueManager(directory, plan)
         def interrupt(signum, frame):
             manager.interrupted = True

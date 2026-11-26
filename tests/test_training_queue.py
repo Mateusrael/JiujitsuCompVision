@@ -1,7 +1,6 @@
 """Queue configuration and scheduling without a GPU or dataset training."""
 
 import json
-import io
 import os
 import sys
 import tempfile
@@ -12,7 +11,7 @@ from unittest.mock import patch
 
 from src.Scripts.training_queue import build_parser, main, resolve_queue
 from src.Train.queue_gpu import GPU
-from src.Train.queue_manager import QueueManager, check_previous_manager, manager_alive, process_token
+from src.Train.queue_manager import QueueManager, manager_alive, process_token
 from src.Train.queue_plan import prepare_plan
 from src.Train.queue_process import TrainingProcess
 
@@ -283,15 +282,28 @@ class QueueLifecycleTests(unittest.TestCase):
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state["jobs"][1]["status"], "cancelled")
 
-    def test_old_live_children_prevent_new_manager_but_reused_pid_does_not(self):
-        state = {"jobs": [{"id": "old", "pid": 54, "process_token": "boot:old"}]}
-        (self.directory / "state.json").write_text(json.dumps(state))
-        lock = io.StringIO(json.dumps({"directory": str(self.directory)}))
-        with patch("src.Train.queue_manager.process_token", return_value="boot:old"):
-            with self.assertRaisesRegex(RuntimeError, "live job old"):
-                check_previous_manager(lock)
-        with patch("src.Train.queue_manager.process_token", return_value="boot:new"):
-            check_previous_manager(lock)
+    def test_two_queues_share_gpus_but_each_respects_own_memory_and_slot_limits(self):
+        first = self.manager()
+        first.step()
+        self.assertEqual(len(first.active), 6)
+        other_dir = self.directory / "second-queue"
+        other_dir.mkdir()
+        second_plan = {**self.plan, "name": "second", "max_parallel": 2,
+                       "jobs": [{**job, "run_dir": str(other_dir / job["id"])}
+                                for job in self.plan["jobs"]]}
+        # Account for the first queue's allocations through current GPU telemetry.
+        shared_gpus = [GPU(0, "GPU-0", "test", 80000, 1000, 0),
+                       GPU(1, "GPU-1", "test", 80000, 16000, 25),
+                       GPU(2, "GPU-2", "test", 80000, 12000, 50)]
+        second = QueueManager(other_dir, second_plan, lambda: shared_gpus, self.factory)
+        second.step()
+        self.assertEqual(len(second.active), 2)
+        self.assertEqual({job["gpu"]["uuid"] for job in second.state["jobs"]
+                          if job["status"] == "running"}, {"GPU-1", "GPU-2"})
+        self.assertEqual(len(first.active), 6)
+        self.assertFalse(any(process.terminated for process in first.active.values()))
+        second.step({"action": "terminate"})
+        self.assertFalse(any(process.terminated for process in first.active.values()))
 
     def test_real_children_log_separately_and_replenish_shared_queue(self):
         self.plan["max_parallel"] = 2

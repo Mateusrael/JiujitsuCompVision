@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from src.Scripts.training_queue import main, read_state
+from src.Scripts.training_queue import main, read_state, select_latest
 from src.Train.queue_gpu import GPU
 
 
@@ -80,7 +80,32 @@ class QueueCLITests(unittest.TestCase):
         code, _ = self.start(launch)
         self.assertEqual(code, 1)
         self.assertIn("Queue could not start", self.stderr.getvalue())
+        self.assertIn("Another queue is already active", self.stderr.getvalue())
         self.assertEqual(json.loads((self.queues / "latest.json").read_text())["name"], "previous")
+
+    def test_duplicate_manager_does_not_overwrite_live_queue_state(self):
+        from src.Train.queue_locks import QueueAlreadyRunning
+
+        original = self.state()
+        with patch("src.Train.queue_manager.run_manager", side_effect=QueueAlreadyRunning("already active")):
+            with self.assertRaises(QueueAlreadyRunning):
+                main(["_manager", str(self.directory)])
+        self.assertEqual(json.loads((self.directory / "state.json").read_text()), original)
+
+    def test_overlapping_starts_publish_latest_without_shared_temporary_files(self):
+        from src.Train.run_metadata import write_json
+
+        self.queues.mkdir()
+        def overlapping_write(path, payload):
+            write_json(path, payload)
+            if payload["name"] == "first":
+                # Another starter publishes while the first temp is waiting.
+                select_latest(self.queues, "second")
+
+        with patch("src.Scripts.training_queue.write_json", side_effect=overlapping_write):
+            select_latest(self.queues, "first")
+        self.assertEqual(json.loads((self.queues / "latest.json").read_text())["name"], "first")
+        self.assertEqual([path.name for path in self.queues.iterdir()], ["latest.json"])
 
     def test_process_creation_failure_is_persisted_in_queue_state(self):
         code, _ = self.start(OSError("process creation unavailable"))
